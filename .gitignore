@@ -1,0 +1,79 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+html/
+
+# Virtual environments
+.venv/
+venv/
+
+# Environment files
+.env
+.env.*
+.env.local
+.env.development
+.env.production
+.env.test
+.dev.vars
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+.pycharm/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+test-results/
+playwright-report/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Jupyter / notebooks
+.ipynb_checkpoints/
+*.ipynb
+.ipynb
+
+# Geronimo / model outputs
+geronimo.yaml
+.models/
+output/
+
+# Downloads / caches
+downloads/
+cache/
+.cache/
+/tmp/
+
+# OS
+.DS_Store
+.thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Build artifacts
+*.joblib
+*.pkl
+*.pt
+*.h5
+
+# Local Claude Testing
+.claude/

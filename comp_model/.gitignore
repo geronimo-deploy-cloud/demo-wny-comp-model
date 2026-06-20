@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+html/
+
+# Virtual environments
+.venv/
+venv/
+
+# Environment files
+.env
+.env.*
+.env.local
+.env.development
+.env.production
+.env.test
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+playwright-report/
+
+# Jupyter / notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+.DS_Store
+.thumbs.db
+
+# Downloads / caches
+/cache/
+/.cache/

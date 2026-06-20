@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+html/
+
+# Virtual environments
+.venv/
+venv/
+
+# Environment files
+.env
+.env.*
+.env.local
+.env.development
+.env.production
+.env.test
+.dev.vars
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+playwright-report/
+
+# Jupyter / notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Geronimo / model outputs
+models/
+*.joblib
+*.pkl
+*.pt
+*.h5
+
+# OS
+.DS_Store
+.thumbs.db
+
+# Downloads / caches
+/cache/
+/.cache/
