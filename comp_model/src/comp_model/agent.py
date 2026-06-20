@@ -61,6 +61,26 @@ async def predict(features: dict[str, Any]) -> str:
 
 
 @mcp.tool()
+async def predict_from_url(url: str) -> str:
+    """Make a prediction from a property listing URL.
+    
+    Args:
+        url: A live property listing URL (e.g., Zillow).
+        
+    Returns:
+        JSON string containing the prediction result.
+    """
+    endpoint = get_endpoint()
+    try:
+        result = endpoint.predict_from_url(url)
+        return str(result)
+    except ValueError as e:
+        return f"Prediction error: {e}"
+    except Exception as e:
+        return f"Prediction error: {e}"
+
+
+@mcp.tool()
 async def get_model_info() -> str:
     """Get information about the deployed model.
     
