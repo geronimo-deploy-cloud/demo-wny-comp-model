@@ -61,7 +61,7 @@ _endpoint = None
 def get_endpoint():
     global _endpoint
     if _endpoint is None:
-        _endpoint = CompModelEndpoint()
+        _endpoint = ExpectedTransactionPriceEndpoint()
         _endpoint.initialize()
     return _endpoint
 

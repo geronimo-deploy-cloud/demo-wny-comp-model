@@ -120,7 +120,7 @@ def main():
         
     print("Loading XGBoost Model...")
     store = ArtifactStore(project="expected-transaction-price", version="1.0.0")
-    model = CompModelModel()
+    model = ExpectedTransactionPriceModel()
     model.load(store)
 
     # Demo placeholder: when the assessor lookup couldn't supply an assessment, fall back
