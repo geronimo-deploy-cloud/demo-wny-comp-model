@@ -16,7 +16,7 @@ def main():
 
     # 1. Initialize and train model
     print("\n1. Training model...")
-    model = CompModelModel()
+    model = ExpectedTransactionPriceModel()
     metrics = model.train()
 
     print("\n   Training Results:")

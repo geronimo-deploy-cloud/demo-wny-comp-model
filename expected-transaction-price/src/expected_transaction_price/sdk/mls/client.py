@@ -77,7 +77,7 @@ class MLSClient:
             return None
 
     def _normalize_to_schema(self, reso_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Strictly coerces the guaranteed RESO payload into our CompModel schema."""
+        """Strictly coerces the guaranteed RESO payload into our expected-transaction-price schema."""
         # Using .get protects us, but the RESO Standard generally guarantees keys exist even if null
         
         # Consolidate half baths into baths precisely as our scraper normalization does

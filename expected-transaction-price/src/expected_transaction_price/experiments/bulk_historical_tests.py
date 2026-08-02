@@ -101,7 +101,7 @@ def load_and_score(max_samples: int | None = None) -> tuple[pd.DataFrame, pd.Dat
 # =============================================================================
 
 
-def plot_feature_importance(model: CompModelModel, output_dir: Path) -> pd.DataFrame:
+def plot_feature_importance(model: ExpectedTransactionPriceModel, output_dir: Path) -> pd.DataFrame:
     """Generate XGBoost native feature importance charts (gain, weight, cover).
 
     Returns:
@@ -182,7 +182,7 @@ def plot_feature_importance(model: CompModelModel, output_dir: Path) -> pd.DataF
 
 
 def compute_shap_values(
-    model: CompModelModel,
+    model: ExpectedTransactionPriceModel,
     X_transformed: pd.DataFrame,
     output_dir: Path,
     max_shap_samples: int = 500,

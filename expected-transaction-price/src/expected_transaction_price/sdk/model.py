@@ -91,7 +91,7 @@ class ExpectedTransactionPriceModel(Model):
             y = df["sale_price"].values
         
         # 4. Fit features
-        self.features = CompModelFeatures()
+        self.features = ExpectedTransactionPriceFeatures()
         X = self.features.fit_transform(df)
         
         # 5. Random train/val split (80/20, stratified by price decile)
@@ -221,7 +221,7 @@ class ExpectedTransactionPriceModel(Model):
         path = store.save(
             "features",
             self.features,
-            artifact_type="CompModelFeatures",
+            artifact_type="ExpectedTransactionPriceFeatures",
             tags={"model": self.name, "version": self.version}
         )
         paths.append(path)
