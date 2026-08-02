@@ -5,7 +5,7 @@ This model is trained on recent residential real estate sales data in the Wester
 Two producer/consumer Python projects communicate via the Geronimo `ArtifactStore`:
 
 1. **`geographic_feature_store`** — weekly batch pipeline that precomputes spatiotemporal velocity grids
-2. **`comp_model`** — realtime XGBoost model serving with a REST endpoint and an MCP server for AI agents
+2. **`expected-transaction-price`** — realtime XGBoost model serving with a REST endpoint and an MCP server for AI agents
 
 ## Geographic Feature Store
 
@@ -29,7 +29,7 @@ The pipeline outputs **12 velocity artifacts**, one for each (radius, lookback w
 | 5 miles  | 90, 180, 365 days |
 | 10 miles | 180, 365 days    |
 
-At inference time, `comp_model` loads the 12 artifacts from the `ArtifactStore` (project: `geographic-feature-store`, version: `1.0.0`), indexes them by `h3_index`, and performs O(1) lookups per property coordinate. This decouples the expensive BallTree computation (run weekly in batch) from the low-latency real-time prediction path.
+At inference time, `expected-transaction-price` loads the 12 artifacts from the `ArtifactStore` (project: `geographic-feature-store`, version: `1.0.0`), indexes them by `h3_index`, and performs O(1) lookups per property coordinate. This decouples the expensive BallTree computation (run weekly in batch) from the low-latency real-time prediction path.
 
 ## Comp Model
 
@@ -77,4 +77,4 @@ The MCP server is mounted at `/mcp` when `geronimo.yaml` sets `model.mcp_enabled
 The server supports two transports:
 
 - **HTTP** — mounted at `http://localhost:8000/mcp` for remote agent access
-- **stdio** — run via `uv run python -m comp_model.agent` for local desktop agents (e.g. Claude Desktop)
+- **stdio** — run via `uv run python -m expected_transaction_price.agent` for local desktop agents (e.g. Claude Desktop)

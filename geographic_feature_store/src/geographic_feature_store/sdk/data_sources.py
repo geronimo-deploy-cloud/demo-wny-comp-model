@@ -4,7 +4,7 @@ Standalone copies of the Buffalo (Socrata) and Rochester (ArcGIS) data loaders.
 Only fetches the columns needed for geographic velocity computation:
   latitude, longitude, sale_date, sale_price, total_living_area, parcel_id, source
 
-These loaders are intentionally decoupled from comp_model so the feature store
+These loaders are intentionally decoupled from expected-transaction-price so the feature store
 can evolve independently without a cross-project runtime dependency.
 """
 
