@@ -315,7 +315,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "geronimo", specifier = ">=0.4.0" },
+    { name = "geronimo", specifier = ">=0.5.0" },
     { name = "h3", specifier = ">=4.0.0" },
     { name = "metaflow", specifier = ">=2.10.0" },
     { name = "numpy", specifier = ">=1.24.0" },
@@ -330,7 +330,7 @@ requires-dist = [
 
 [[package]]
 name = "geronimo"
-version = "0.4.0"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -341,9 +341,9 @@ dependencies = [
     { name = "rich" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/46/99/6a2275ec0c019b26dfe5840717244cec51b25271642996862aac1afd8108/geronimo-0.4.0.tar.gz", hash = "sha256:fb137b37b6bce275c4cf68aff2191f2bab1e575d6cf5a568bb6c518832691f8b", size = 869372 }
+sdist = { url = "https://files.pythonhosted.org/packages/5a/ec/7966c8aab89151e27abe35ddf0d48a6bd7cdca3db36283f38a39aec0d993/geronimo-0.5.0.tar.gz", hash = "sha256:c2b29038dea106c1a0c95f7bf142d8480e541c6fee54e630c25fc756c85615e2", size = 889526 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8b/59/a9055baa354ba90bec08d9eca0743dc1f5c7792c2b4e65e88c5125448f8a/geronimo-0.4.0-py3-none-any.whl", hash = "sha256:da37307e05680ac649a6d07b38d02ea28b5f14d1c7a5a373cc37c18457352e4f", size = 140271 },
+    { url = "https://files.pythonhosted.org/packages/68/fa/c2b1cd87d60545ee5d75834011ed3de6f6748334e30d02585dfc7a29b708/geronimo-0.5.0-py3-none-any.whl", hash = "sha256:166e10bf14413335cde0b81b67de1152ed4b9e6a1a6cf97d12b55c1838588634", size = 153643 },
 ]
 
 [[package]]
