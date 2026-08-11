@@ -26,8 +26,65 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Geographic Feature Store — load precomputed velocity grids
+# Canonical feature lists — single source of truth for all projects.
+#
+# Any project that consumes property data should import these lists rather
+# than re-declaring feature names.  If a feature is added or removed here,
+# every consumer picks it up automatically.
 # =============================================================================
+
+# Physical features used in the comp vector (numeric measurements).
+PHYSICAL_FEATURES = [
+    "total_living_area",
+    "first_floor_area",
+    "second_floor_area",
+    "beds",
+    "kitchens",
+    "stories",
+    "lot_frontage",
+    "lot_depth",
+    "lot_acres",
+    "year_built",
+    "assessed_value",
+    "land_value",
+]
+
+# Macro-economic features from FRED.
+MACRO_FEATURES = [
+    "mortgage_30y",
+    "fed_funds",
+    "cpi",
+    "unemployment",
+]
+
+# Geographic velocity features from the feature store (derived).
+GEO_VELOCITY_FEATURES = [
+    "geo_vol_r1_w90",
+    "geo_ppsf_r1_w90",
+    "geo_vol_r1_w365",
+    "geo_ppsf_r1_w365",
+    "geo_vol_r5_w90",
+    "geo_ppsf_r5_w90",
+    "geo_vol_r5_w180",
+    "geo_ppsf_r5_w180",
+    "geo_vol_r10_w180",
+    "geo_ppsf_r10_w180",
+    "geo_vol_r10_w365",
+    "geo_ppsf_r10_w365",
+]
+
+# Categorical features excluded from the comp vector (high-cardinality nominal).
+CATEGORICAL_FEATURES = [
+    "building_style",
+    "exterior_wall",
+    "heat_type",
+    "central_air",
+    "basement_type",
+    "school_district",
+]
+
+# Combined comp-vector feature list (physical + macro + geo velocity).
+ALL_VECTOR_FEATURES = PHYSICAL_FEATURES + MACRO_FEATURES + GEO_VELOCITY_FEATURES
 
 # Velocity artifact configs: (radius_miles, lookback_days, artifact_name)
 # Selected combos that span hyperlocal → metro, short → annual

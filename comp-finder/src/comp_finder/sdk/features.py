@@ -1,12 +1,14 @@
 """Feature definitions for comp-finder.
 
 Defines the 28 features that make up the comp vector (physical + macro +
-geographic velocity). The comp-finder does NOT redefine the regressor's
-features — it imports the geo velocity derived functions from
-`expected_transaction_price.sdk.features` and re-declares them here
-so that `FeatureSet.transform()` produces the same columns.
+geographic velocity).  The canonical feature lists are imported from
+`expected_transaction_price.sdk.features` — that project is the single
+source of truth for feature names.  If the regressor project is not
+installed, local fallback copies are used (for standalone testing).
 
 Categorical features are excluded from the comp vector by design.
+
+See [FEATURES.md](./FEATURES.md) for the full feature ownership policy.
 """
 
 from typing import Optional
@@ -18,65 +20,65 @@ from sklearn.preprocessing import StandardScaler
 from geronimo.features import FeatureSet, Feature
 
 # ---------------------------------------------------------------------------
-# Feature family definitions (mirrors expected-transaction-price/sdk/features.py)
+# Canonical feature lists — imported from expected-transaction-price.
+#
+# These are the single source of truth.  If expected-transaction-price adds
+# or removes a feature, comp-finder picks it up automatically.  The local
+# fallback lists below are only used when the regressor project isn't
+# installed (standalone unit tests, CI without the full workspace).
 # ---------------------------------------------------------------------------
-
-PHYSICAL_FEATURES = [
-    "total_living_area",
-    "first_floor_area",
-    "second_floor_area",
-    "beds",
-    "kitchens",
-    "stories",
-    "lot_frontage",
-    "lot_depth",
-    "lot_acres",
-    "year_built",
-    "assessed_value",
-    "land_value",
-]
-
-MACRO_FEATURES = [
-    "mortgage_30y",
-    "fed_funds",
-    "cpi",
-    "unemployment",
-]
-
-GEO_VELOCITY_FEATURES = [
-    "geo_vol_r1_w90",
-    "geo_ppsf_r1_w90",
-    "geo_vol_r1_w365",
-    "geo_ppsf_r1_w365",
-    "geo_vol_r5_w90",
-    "geo_ppsf_r5_w90",
-    "geo_vol_r5_w180",
-    "geo_ppsf_r5_w180",
-    "geo_vol_r10_w180",
-    "geo_ppsf_r10_w180",
-    "geo_vol_r10_w365",
-    "geo_ppsf_r10_w365",
-]
-
-# Categorical features excluded from the comp vector.
-# Reason: these are high-cardinality nominal attributes (building_style,
-# exterior_wall, heat_type, central_air, basement_type, school_district).
-# Including them as one-hot encodings at full Euclidean weight would cause
-# a single mismatched category to dominate the distance, drowning out the
-# signal from physical, macro, and geographic features. Instead, they should
-# be used as pre-filter matching criteria (e.g., "same school district" is a
-# binary filter, not a distance contribution).
-CATEGORICAL_FEATURES = [
-    "building_style",
-    "exterior_wall",
-    "heat_type",
-    "central_air",
-    "basement_type",
-    "school_district",
-]
-
-# All features used in the comp vector (physical + macro + geo velocity).
-ALL_VECTOR_FEATURES = PHYSICAL_FEATURES + MACRO_FEATURES + GEO_VELOCITY_FEATURES
+try:
+    from expected_transaction_price.sdk.features import (
+        PHYSICAL_FEATURES,
+        MACRO_FEATURES,
+        GEO_VELOCITY_FEATURES,
+        CATEGORICAL_FEATURES,
+        ALL_VECTOR_FEATURES,
+    )
+except ImportError:
+    PHYSICAL_FEATURES = [
+        "total_living_area",
+        "first_floor_area",
+        "second_floor_area",
+        "beds",
+        "kitchens",
+        "stories",
+        "lot_frontage",
+        "lot_depth",
+        "lot_acres",
+        "year_built",
+        "assessed_value",
+        "land_value",
+    ]
+    MACRO_FEATURES = [
+        "mortgage_30y",
+        "fed_funds",
+        "cpi",
+        "unemployment",
+    ]
+    GEO_VELOCITY_FEATURES = [
+        "geo_vol_r1_w90",
+        "geo_ppsf_r1_w90",
+        "geo_vol_r1_w365",
+        "geo_ppsf_r1_w365",
+        "geo_vol_r5_w90",
+        "geo_ppsf_r5_w90",
+        "geo_vol_r5_w180",
+        "geo_ppsf_r5_w180",
+        "geo_vol_r10_w180",
+        "geo_ppsf_r10_w180",
+        "geo_vol_r10_w365",
+        "geo_ppsf_r10_w365",
+    ]
+    CATEGORICAL_FEATURES = [
+        "building_style",
+        "exterior_wall",
+        "heat_type",
+        "central_air",
+        "basement_type",
+        "school_district",
+    ]
+    ALL_VECTOR_FEATURES = PHYSICAL_FEATURES + MACRO_FEATURES + GEO_VELOCITY_FEATURES
 
 # Default per-family weight multipliers (applied after standardization).
 DEFAULT_FAMILY_WEIGHTS = {
