@@ -124,10 +124,7 @@ class CompFinderModel(Model):
             raise RuntimeError("Model not initialized. Call train() or load() first.")
 
         # Load scaler from store if not yet fitted.
-        if (
-            self.features._comp_vector_scaler is None
-            and self.features._comp_vector_scaler is not None
-        ):
+        if self.features._comp_vector_scaler is None:
             try:
                 store = ArtifactStore(project=SCALER_PROJECT, version=SCALER_VERSION)
                 scaler = store.get(SCALER_ARTIFACT_NAME)
