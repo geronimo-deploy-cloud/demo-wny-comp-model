@@ -27,6 +27,7 @@ comp-finder/
 ├── src/
 │   └── comp_finder/
 │       ├── sdk/           # Geronimo SDK definitions
+│       │   ├── FEATURES.md # Feature ownership policy (read this first)
 │       │   ├── endpoint.py   # Request handling
 │       │   ├── model.py      # Model definition
 │       │   ├── features.py   # Feature engineering
@@ -37,6 +38,11 @@ comp-finder/
 ├── models/                # Model artifacts
 └── tests/
 ```
+
+## Feature Ownership
+
+**`expected_transaction_price` is the arbiter of all feature names** across models.\nSee [sdk/FEATURES.md](src/comp_finder/sdk/FEATURES.md) for the full policy on how
+to add features, handle exceptions, and avoid drift between models.
 
 ## Deployment
 
