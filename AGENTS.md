@@ -73,7 +73,7 @@ src/<project>/sdk/
 
 - **Rochester-only training** with log1p(sale_price) target. Buffalo loaders exist but aren't used by `model.train()` — see the comment block at the top of `sdk/model.py`.
 - `CompModelEndpoint` has a **demo-mode fallback**: if no artifact is found, `initialize()` silently sets `self.model = None` and `handle()` echoes the request back. Untrained deploys serve 200s, not 500s — be aware when debugging.
-- Training filters to sale_price ∈ [$20k, $1.5M] and sale_date ≥ 2015-01-01, then does an 80/20 random split stratified by price decile with XGBoost early stopping.
+- Training filters to sale_price ∈ [$100k, $600k] and sale_date > 2022-01-01 for Rochester; Buffalo is filtered to property classes 210–250 with basic validity checks. The combined data used by the comp-finder index pipeline applies the same 100k-600k / >2022-01-01 filter to both cities, then does an 80/20 random split stratified by price decile with XGBoost early stopping.
 - The FastAPI app mounts the MCP server at `/mcp` only when `geronimo.yaml`'s `model.mcp_enabled` is true.
 
 ### geographic_feature_store specifics
@@ -84,8 +84,8 @@ src/<project>/sdk/
 
 ### Data source quirks
 
-- **Buffalo**: Socrata SODA API, paginated by `$offset`, filters to property classes 210–250. Half baths are not split out (hardcoded to 0).
-- **Rochester**: ArcGIS REST API, paginated by `resultOffset`. Polygon centroids come in **EPSG:3857** and must be reprojected to EPSG:4326 — `_load_rochester_training_data` does this via `pyproj.Transformer`. School districts are assigned via spatial join against the TIGER 2023 NYS UNSD shapefile, cached at `/tmp/tiger_school_districts`.
+- **Buffalo**: Socrata SODA API, paginated by `$offset`, filters to property classes 210–250. Half baths are not split out (hardcoded to 0). Combined training data enforces sale_price ∈ [$100k, $600k] and sale_date > 2022-01-01 for both Buffalo and Rochester after the join.
+- **Rochester**: ArcGIS REST API, paginated by `resultOffset`. Polygon centroids come in **EPSG:3857** and must be reprojected to EPSG:4326 — `_load_rochester_training_data` does this via `pyproj.Transformer`. School districts are assigned via spatial join against the TIGER 2023 NYS UNSD shapefile, cached at `/tmp/tiger_school_districts`. Training data is filtered to sale_price ∈ [$100k, $600k] and sale_date > 2022-01-01.
 - The `UNIFIED_COLUMNS` list in `expected-transaction-price/sdk/data_sources.py` is the contract — every source loader normalizes to that schema before the feature layer sees it.
 
 
