@@ -1,38 +1,35 @@
-"""Training script for comp-finder.
+"""Training script for comp-vector index pipeline.
 
 Usage:
     uv run python -m comp_finder.train
 """
 
 from geronimo.artifacts import ArtifactStore
-from comp_finder.sdk.model import CompFinderModel
+from comp_finder.pipeline import CompSearchPipeline, INDEX_PROJECT, INDEX_VERSION
 
 
 def main():
-    """Train and save the model."""
+    """Train and save the comp-vector index."""
     print("=" * 50)
-    print("Model Training")
+    print("Comp-Vector Index Training")
     print("=" * 50)
 
-    # 1. Initialize and train model
-    # Data loading and feature engineering are handled by the model class
-    print("\n1. Training model...")
-    model = CompFinderModel()
+    # 1. Initialize and train pipeline
+    print("\n1. Training pipeline...")
+    pipeline = CompSearchPipeline(h3_resolution=8)
     
-    # Train (logic encapsulated in model.train())
-    metrics = model.train()
+    metrics = pipeline.train()
     print(f"   Training metrics: {metrics}")
 
-    # 2. Save model artifacts
+    # 2. Save artifacts to ArtifactStore
     print("\n2. Saving artifacts...")
     
-    # ArtifactStore uses your global config from ~/.geronimo/config.yaml
     store = ArtifactStore(
-        project="comp-finder",
-        version="1.0.0",
+        project=INDEX_PROJECT,
+        version=INDEX_VERSION,
     )
     
-    paths = model.save(store)
+    paths = pipeline.publish(store)
     print(f"   Saved artifacts to {len(paths)} locations")
     print(f"   Backend: {store.backend}")
 

@@ -78,3 +78,4 @@ logs/
 # Local Claude Testing
 .claude/
 .pi/extensions/emdash-hook.ts
+.opencode/plugins/emdash-notifications.js
