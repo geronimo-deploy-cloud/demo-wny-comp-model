@@ -24,8 +24,10 @@ from comp_finder.pipeline import (
     LOOKUP_ARTIFACT_NAME,
     UNIFIED_COLUMNS,
 )
-from comp_finder.sdk.features import ALL_VECTOR_FEATURES
+from comp_finder.sdk.features import ALL_VECTOR_FEATURES, CompFinderFeatures, GEO_VELOCITY_FEATURES
 from geronimo.artifacts import ArtifactStore
+
+import comp_finder.pipeline as pipeline_module
 
 
 # =============================================================================
@@ -516,3 +518,97 @@ class TestConstants:
         assert "latitude" in UNIFIED_COLUMNS
         assert "longitude" in UNIFIED_COLUMNS
         assert len(UNIFIED_COLUMNS) == 36  # All unified schema columns
+
+
+# =============================================================================
+# Fail-safe: run() completes when a feature family is inactive
+# =============================================================================
+
+
+@pytest.fixture
+def bare_venv(monkeypatch):
+    """Force the geographic family inactive (derived fns -> None), the state
+    of a venv without the regressor package / with the feature store down."""
+    for name in GEO_VELOCITY_FEATURES:
+        feature = CompFinderFeatures.__dict__[name]
+        monkeypatch.setattr(feature, "_derived_feature_fn", None)
+
+
+class TestPipelineFailSafe:
+    """CompSearchPipeline.run() must build a finite index in a bare venv
+    (geo family inactive) instead of crashing at BallTree.fit."""
+
+    def _wire_run(self, monkeypatch, tmpdir, n):
+        sales = _make_synthetic_sales(n)
+        monkeypatch.setattr(
+            pipeline_module, "_load_combined_training_data", lambda: sales
+        )
+        # No persisted scaler yet -> build falls back to raw (zeroed) values.
+        monkeypatch.setattr(CompSearchPipeline, "_load_scaler", lambda self: None)
+        real_store = ArtifactStore
+        monkeypatch.setattr(
+            pipeline_module,
+            "ArtifactStore",
+            lambda **kw: real_store(base_path=str(tmpdir), **kw),
+        )
+        return sales
+
+    def test_run_completes_with_inactive_geo_family(self, monkeypatch, tmp_path, bare_venv, caplog):
+        import logging
+
+        sales = self._wire_run(monkeypatch, tmp_path, 40)
+        caplog.set_level(logging.WARNING)
+
+        pipeline = CompSearchPipeline()
+        pipeline.initialize()
+        summary = pipeline.run()
+
+        assert summary["status"] == "success"
+        assert summary["sales_records"] == 40
+        assert summary["comp_vector_length"] == len(ALL_VECTOR_FEATURES)
+        assert pipeline.is_fitted
+        assert np.isfinite(np.asarray(pipeline._index.data)).all()
+        # The inactive geographic family was reported and zeroed.
+        assert "geographic" in caplog.text
+
+    def test_run_matches_active_passthrough_when_geo_available(
+        self, monkeypatch, tmp_path, geo_passthrough_run
+    ):
+        """A run where the geo family is active (passthrough) also completes
+        and produces a finite index (byte-identical fail-safe = no-op)."""
+        pipeline = geo_passthrough_run
+        assert pipeline.is_fitted
+        data = np.asarray(pipeline._index.data)
+        assert np.isfinite(data).all()
+        # geo family active -> last 12 columns carry real (nonzero) signal.
+        assert (data[:, -len(GEO_VELOCITY_FEATURES):] != 0).any()
+
+
+@pytest.fixture
+def geo_passthrough_run(monkeypatch, tmp_path):
+    """A pipeline that has completed run() with the geo family ACTIVE (via
+    passthrough), so no zero-fill occurs."""
+    for name in GEO_VELOCITY_FEATURES:
+        feature = CompFinderFeatures.__dict__[name]
+        fn = (lambda name: (lambda df: df[name]))(name)
+        monkeypatch.setattr(feature, "_derived_feature_fn", fn)
+
+    sales = _make_synthetic_sales(40)
+    # Give the population real geo columns so passthrough emits real values.
+    rng = np.random.RandomState(5)
+    for name in GEO_VELOCITY_FEATURES:
+        sales[name] = rng.uniform(1, 100, len(sales))
+    monkeypatch.setattr(
+        pipeline_module, "_load_combined_training_data", lambda: sales
+    )
+    monkeypatch.setattr(CompSearchPipeline, "_load_scaler", lambda self: None)
+    real_store = ArtifactStore
+    monkeypatch.setattr(
+        pipeline_module,
+        "ArtifactStore",
+        lambda **kw: real_store(base_path=str(tmp_path), **kw),
+    )
+    pipeline = CompSearchPipeline()
+    pipeline.initialize()
+    pipeline.run()
+    return pipeline

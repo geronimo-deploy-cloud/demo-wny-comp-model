@@ -28,8 +28,8 @@ from .features import (
     SCALER_VERSION,
     ALL_VECTOR_FEATURES,
     DEFAULT_FAMILY_WEIGHTS,
-    MACRO_FEATURES,
-    PHYSICAL_FEATURES,
+    comp_feature_template,
+    ensure_feature_inputs,
     get_comp_vector_info,
 )
 from ..pipeline import (
@@ -295,18 +295,8 @@ class CompFinder:
         # FeatureSet requires fit() before transform(); there are no
         # stateful transformers, so an empty frame declaring every
         # feature column is all that's needed to mark the set as fitted.
-        self.features.fit(self._fit_template())
+        self.features.fit(comp_feature_template())
         self.features.set_scaler(scaler)
-
-    def _fit_template(self) -> pd.DataFrame:
-        """An empty frame declaring every feature column (fit is a no-op
-        marker — the feature set has no stateful transformers)."""
-        columns = dict.fromkeys(
-            list(PHYSICAL_FEATURES) + list(MACRO_FEATURES) + list(ALL_VECTOR_FEATURES)
-            + ["latitude", "longitude"],
-            np.nan,
-        )
-        return pd.DataFrame(columns=columns)
 
     @property
     def population_size(self) -> int:
@@ -368,7 +358,12 @@ class CompFinder:
                 f"got {type(property_features).__name__}"
             )
 
-        features_df = self.features.transform(df)
+        features_df = self.features.transform(ensure_feature_inputs(df))
+        # build_comp_vector zero-fills any feature family that is entirely
+        # NaN here (e.g. geographic when the feature store / regressor
+        # package is unavailable), so an inactive family contributes nothing
+        # to the distance instead of crashing BallTree with "Input contains
+        # NaN".  The same policy is applied to the index at build time.
         vector = np.asarray(
             self.features.build_comp_vector(features_df), dtype=np.float64
         ).reshape(1, -1)

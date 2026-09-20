@@ -36,6 +36,8 @@ from .sdk.features import (
     SCALER_ARTIFACT_NAME,
     SCALER_PROJECT,
     SCALER_VERSION,
+    comp_feature_template,
+    ensure_feature_inputs,
 )
 from .sdk.data_sources import _load_combined_training_data
 
@@ -112,14 +114,28 @@ class CompSearchPipeline(BatchPipeline):
 
         logger.info("Loaded %d sales records", len(df))
 
-        # 2. Transform to get feature columns
+        # 2. Fit + transform to feature columns.  The combined loader emits
+        #    physical + coordinate columns but not the macro source columns;
+        #    add any missing ones as NaN so ``transform`` does not raise for
+        #    an unused family.  ``build_comp_vector`` then zero-fills any
+        #    family left entirely NaN (e.g. geographic when the feature
+        #    store / regressor package is unavailable) instead of crashing
+        #    BallTree.
         logger.info("Transforming features...")
-        features_df = self.features.transform(df)
+        self.features.fit(comp_feature_template())
+        features_df = self.features.transform(ensure_feature_inputs(df))
 
-        # 3. Load scaler from ArtifactStore
+        # 3. Load scaler from ArtifactStore (optional — an unfitted scaler is
+        #    handled by build_comp_vector falling back to raw values).
         logger.info("Loading comp vector scaler from ArtifactStore...")
         scaler = self._load_scaler()
-        self.features.set_scaler(scaler)
+        if scaler is not None:
+            self.features.set_scaler(scaler)
+        else:
+            logger.warning(
+                "No comp-vector scaler in ArtifactStore; building on raw "
+                "(zeroed) features."
+            )
 
         # 4. Build comp vectors for every sale
         logger.info("Building comp vectors for %d records...", len(df))
@@ -238,9 +254,18 @@ class CompSearchPipeline(BatchPipeline):
         return self._lookup_df.iloc[indices[0]].reset_index(drop=True)
 
     def _load_scaler(self) -> object:
-        """Load the comp vector scaler from ArtifactStore."""
-        store = ArtifactStore(project=SCALER_PROJECT, version=SCALER_VERSION)
-        return store.get(artifact_name=SCALER_ARTIFACT_NAME)
+        """Load the comp vector scaler from ArtifactStore.
+
+        Returns ``None`` when no scaler has been persisted yet — the build
+        path treats a missing scaler as "standardize nothing" (raw values)
+        rather than failing, keeping the index build fail-safe.
+        """
+        try:
+            store = ArtifactStore(project=SCALER_PROJECT, version=SCALER_VERSION)
+            return store.get(artifact_name=SCALER_ARTIFACT_NAME)
+        except Exception as e:  # noqa: BLE001 - any store miss / backend error
+            logger.warning("Could not load comp-vector scaler from store: %s", e)
+            return None
 
     @property
     def is_fitted(self) -> bool:

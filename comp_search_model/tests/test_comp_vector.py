@@ -411,14 +411,54 @@ class TestErrorHandling:
         with pytest.raises(ValueError):
             features.build_comp_vector(empty_df)
 
-    def test_build_comp_vector_all_nan_handles_gracefully(self, training_df):
-        """All-NaN input is handled gracefully (NaN vector output)."""
+    def test_build_comp_vector_all_nan_zeroed(self, training_df):
+        """A wholly-NaN frame marks every family inactive and is zero-filled
+        (finite vector) instead of emitting NaN — the fail-safe policy."""
         nan_df = pd.DataFrame({f: [float("nan")] * 5 for f in ALL_VECTOR_FEATURES})
         features = CompFinderFeatures()
         features.fit(nan_df)
         vector = features.build_comp_vector(nan_df.iloc[:1])
         assert len(vector) == len(ALL_VECTOR_FEATURES)
-        assert np.isnan(vector[0])  # First feature is NaN
+        assert np.isfinite(vector).all()
+        assert np.all(vector == 0.0)
+
+    def test_build_comp_vector_inactive_family_zeroed(self, training_df):
+        """Only the all-NaN family is zeroed; active families are untouched.
+
+        The inactive geographic block becomes constant across rows (so it
+        contributes nothing to pairwise distance) while the active physical
+        block keeps varying row-to-row.  The scaler is fit on the active
+        population (as it would be in production before the store went down).
+        """
+        features = CompFinderFeatures()
+        features.fit(training_df)
+        features.set_scaler(
+            StandardScaler().fit(training_df[ALL_VECTOR_FEATURES].values)
+        )
+        df = training_df.copy()
+        df[GEO_VELOCITY_FEATURES] = np.nan
+        matrix = features.build_comp_vector(df)  # (n_rows, 28)
+        assert np.isfinite(matrix).all()
+        n_phys, n_macro = len(PHYSICAL_FEATURES), len(MACRO_FEATURES)
+        geo_block = matrix[:, n_phys + n_macro:]
+        physical_block = matrix[:, :n_phys]
+        # Inactive geo is constant down every column -> zero distance share.
+        assert np.all(geo_block == geo_block[0][None, :])
+        # Active physical still varies across rows.
+        assert not np.all(physical_block == physical_block[0][None, :])
+
+
+
+    def test_build_comp_vector_active_families_unchanged(self, training_df):
+        """With no NaN anywhere the fail-safe is a no-op (byte-identical)."""
+        features = CompFinderFeatures()
+        scaler = StandardScaler().fit(training_df[ALL_VECTOR_FEATURES].values)
+        features.fit(training_df)
+        features.set_scaler(scaler)
+        built = features.build_comp_vector(training_df)
+        raw = scaler.transform(training_df[ALL_VECTOR_FEATURES].values.astype(np.float64))
+        np.testing.assert_array_equal(built, raw)
+
 
 
 # ---------------------------------------------------------------------------
