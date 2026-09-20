@@ -32,6 +32,10 @@ uv run python -m comp_finder.experiments.comp_quality synthetic
 
 # Real Buffalo + Rochester sales (network; cached under /tmp afterwards)
 uv run python -m comp_finder.experiments.comp_quality real [--limit N] [--json out.json]
+
+# Real mode additionally joins FRED macro indicators onto the population;
+# set the API key to keep the macro family active:
+FRED_API_KEY=... uv run python -m comp_finder.experiments.comp_quality real
 ```
 
 - **Holdout price prediction (leave-one-out):** each query sale is removed
@@ -41,8 +45,32 @@ uv run python -m comp_finder.experiments.comp_quality real [--limit N] [--json o
 - **Family ablation:** same protocol under different physical/macro/
   geographic family weights to see which families carry price signal.
 
-In a venv without `expected_transaction_price` the geographic family (and, on
-real data, the macro family) is inactive and zeroed; the report says so.
+A family whose columns are entirely unresolvable (no `FRED_API_KEY` for
+macro; no geographic-feature-store artifacts for the geo family) is zeroed
+and reported as INACTIVE; see the module docstring. The Ticket 7b
+geo-activation before/after evaluation is in
+[reports/ticket7b_geo_activation.md](reports/ticket7b_geo_activation.md).
+
+## Geographic feature store prerequisite
+
+The 12 geo velocity features resolve against the
+`geographic-feature-store` ArtifactStore (version `1.0.0`) at index-build
+and query time. Publish the artifacts from the sibling project first (this
+is the existing weekly batch command; no extra tooling):
+
+```bash
+cd ../geographic_feature_store
+uv run python -m geographic_feature_store.flow run
+```
+
+With the default local ArtifactStore backend (`artifacts.base_path` in
+`~/.geronimo/config.yaml`), the artifacts land under
+`~/.geronimo/artifacts/geographic-feature-store/1.0.0/` — the six velocity
+grids the comp-finder reads (`geo_velocity_r1_w90`, `geo_velocity_r1_w365`,
+`geo_velocity_r5_w90`, `geo_velocity_r5_w180`, `geo_velocity_r10_w180`,
+`geo_velocity_r10_w365`) plus `features_config` (H3 resolution). If the
+store is missing, the geo features fall back to NaN and the family is
+reported INACTIVE rather than crashing.
 
 ## Project Structure
 
@@ -72,6 +100,10 @@ comp_search_model/
 See [sdk/FEATURES.md](src/comp_finder/sdk/FEATURES.md) for the full policy on how
 to add features, handle exceptions, and avoid drift between models.
 
-If `expected_transaction_price` is not installed in this project's venv, local
-fallback copies of the feature lists are used and the 12 geographic velocity
-features silently return NaN — see the comments in `sdk/features.py`.
+`expected_transaction_price` is an editable path dependency (see
+`[tool.uv.sources]` in `pyproject.toml`), so `uv sync` installs it and the comp
+vector uses the regressor's canonical feature lists and live geo velocity H3
+lookups. The local fallback copies in `sdk/features.py` only engage when the
+sibling checkout is absent (e.g. a standalone clone of this project alone), in
+which case the 12 geographic velocity features return NaN and the geographic
+family is reported INACTIVE.

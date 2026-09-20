@@ -1,0 +1,117 @@
+{
+  "real": {
+    "population_size": 10123,
+    "n_queries": 200,
+    "k": 5,
+    "seed": 42,
+    "inactive_families": [
+      "macro"
+    ],
+    "holdout": {
+      "comp_finder": {
+        "n": 200,
+        "spearman": 0.7615165978480432,
+        "mape": 0.18943691487977,
+        "median_ape": 0.15562095480899707,
+        "within_10": 0.34,
+        "within_15": 0.475,
+        "within_20": 0.635
+      },
+      "population_median": {
+        "n": 200,
+        "spearman": NaN,
+        "mape": 0.3039044854289976,
+        "median_ape": 0.25862068965517243,
+        "within_10": 0.15,
+        "within_15": 0.26,
+        "within_20": 0.395
+      },
+      "city_median": {
+        "n": 200,
+        "spearman": 0.15494430822191144,
+        "mape": 0.3000488910311292,
+        "median_ape": 0.27741296345470634,
+        "within_10": 0.19,
+        "within_15": 0.28,
+        "within_20": 0.35
+      },
+      "random_k": {
+        "n": 200,
+        "spearman": 0.018287725495148226,
+        "mape": 0.35050108086186044,
+        "median_ape": 0.3015151515151515,
+        "within_10": 0.155,
+        "within_15": 0.265,
+        "within_20": 0.345
+      },
+      "similarity_vs_error_spearman": -0.19234223713639131,
+      "per_source": {
+        "Buffalo": {
+          "n": 57,
+          "spearman": 0.8935173343357059,
+          "mape": 0.14143770432589745,
+          "median_ape": 0.12,
+          "within_10": 0.49122807017543857,
+          "within_15": 0.6666666666666666,
+          "within_20": 0.8070175438596491
+        },
+        "ROCHESTER": {
+          "n": 143,
+          "spearman": 0.6846529156516213,
+          "mape": 0.20856946733830659,
+          "median_ape": 0.1810344827586207,
+          "within_10": 0.27972027972027974,
+          "within_15": 0.3986013986013986,
+          "within_20": 0.5664335664335665
+        }
+      }
+    },
+    "ablation": [
+      {
+        "config": "all (default)",
+        "skipped": true
+      },
+      {
+        "n": 200,
+        "spearman": 0.7748734145389088,
+        "mape": 0.17800063753542222,
+        "median_ape": 0.1449505649717514,
+        "within_10": 0.38,
+        "within_15": 0.505,
+        "within_20": 0.64,
+        "config": "physical only",
+        "mean_top1_distance": 0.705596991743327
+      },
+      {
+        "config": "macro only",
+        "skipped": true
+      },
+      {
+        "n": 200,
+        "spearman": 0.6024108363779413,
+        "mape": 0.2554453489298228,
+        "median_ape": 0.2,
+        "within_10": 0.25,
+        "within_15": 0.41,
+        "within_20": 0.51,
+        "config": "geographic only",
+        "mean_top1_distance": 0.0
+      },
+      {
+        "config": "physical + macro",
+        "skipped": true
+      },
+      {
+        "n": 200,
+        "spearman": 0.7615165978480432,
+        "mape": 0.18943691487977,
+        "median_ape": 0.15562095480899707,
+        "within_10": 0.34,
+        "within_15": 0.475,
+        "within_20": 0.635,
+        "config": "physical + geographic",
+        "mean_top1_distance": 0.9573762680891211
+      }
+    ]
+  }
+}
