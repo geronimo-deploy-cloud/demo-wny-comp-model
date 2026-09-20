@@ -35,7 +35,12 @@ from comp_finder.sdk.features import (
     ALL_VECTOR_FEATURES,
     CompFinderFeatures,
     GEO_VELOCITY_FEATURES,
+    MACRO_FEATURES,
+    PHYSICAL_FEATURES,
     SCALER_ARTIFACT_NAME,
+    FAMILY_FEATURE_COLUMNS,
+    comp_feature_template,
+    ensure_feature_inputs,
 )
 from comp_finder.sdk.model import CompFinder, DEFAULT_K
 
@@ -212,7 +217,7 @@ def geo_passthrough(monkeypatch):
     through unchanged.
 
     The real derived functions resolve H3 cells against the geographic
-    feature store (an optional dependency of this package); in a minimal
+    feature store (an optional dependency); in a minimal
     environment they are None, and in tests we don't want the result to
     depend on which is the case.  Pass-through keeps the tests
     deterministic in both environments.
@@ -221,6 +226,18 @@ def geo_passthrough(monkeypatch):
         feature = CompFinderFeatures.__dict__[name]
         fn = (lambda name: (lambda df: df[name]))(name)
         monkeypatch.setattr(feature, "_derived_feature_fn", fn)
+
+
+@pytest.fixture
+def geo_inactive(monkeypatch):
+    """Force the geographic family INACTIVE (a venv without the regressor
+    package / down feature store): derived fns -> None so transform emits
+    an all-NaN geo block, which the comp-vector build must zero-fill.
+    """
+    for name in GEO_VELOCITY_FEATURES:
+        feature = CompFinderFeatures.__dict__[name]
+        monkeypatch.setattr(feature, "_derived_feature_fn", None)
+
 
 
 # =============================================================================
@@ -424,3 +441,95 @@ class TestCompFinderStandalone:
         vectors = pipeline.features.build_comp_vector(features_df)
         pipeline._index = BallTree(vectors, metric="euclidean")
         assert vectors.shape == (20, len(ALL_VECTOR_FEATURES))
+
+
+# =============================================================================
+# Fail-safe: inactive geographic family (no regressor package / store down)
+# =============================================================================
+
+
+class TestFindCompsInactiveGeo:
+    """find_comps must answer queries when the geographic family is inactive
+    (all-NaN) instead of raising BallTree's "Input contains NaN"."""
+
+    def test_returns_results_when_query_geo_inactive(self, indexed, geo_inactive):
+        finder = indexed["finder"]
+        rng = np.random.RandomState(3)
+        prop = _random_property(rng)  # carries geo values, but fns -> None
+        results = finder.find_comps(prop, k=5)
+        assert len(results) == 5
+        assert [r["rank"] for r in results] == [1, 2, 3, 4, 5]
+        assert all(np.isfinite(r["distance"]) for r in results)
+
+    def test_build_matches_query_semantics_when_both_inactive(
+        self, tmp_path, geo_inactive
+    ):
+        """A self-identical property still ranks first (distance ~ 0) even
+        when both the index and the query run with the geo family down — the
+        same zero-fill is applied to the build and query vectors."""
+        n = 40
+        sales = _make_synthetic_sales(n)
+        features = CompFinderFeatures()
+        features.fit(comp_feature_template())
+        transformed = features.transform(ensure_feature_inputs(sales))
+        assert transformed[GEO_VELOCITY_FEATURES].isna().all().all()
+        # Fit the scaler on the build matrix with inactive families already
+        # zeroed (as a real training run would, before the store went down),
+        # then share that same scaler with CompFinder's query path.
+        build_matrix = transformed[ALL_VECTOR_FEATURES].astype(float)
+        for cols in FAMILY_FEATURE_COLUMNS.values():
+            if build_matrix[cols].isna().all().all():
+                build_matrix[cols] = 0.0
+        scaler = StandardScaler().fit(build_matrix.values)
+        features.set_scaler(scaler)
+        vectors = np.atleast_2d(features.build_comp_vector(transformed))
+        assert np.isfinite(vectors).all()
+
+        # geo + macro blocks (last 16) pinned to 0 -> identical for all rows.
+        geo_block = vectors[:, len(PHYSICAL_FEATURES) + len(MACRO_FEATURES):]
+        assert np.all(geo_block == 0.0)
+
+        index = BallTree(vectors, metric="euclidean")
+        lookup = sales[UNIFIED_COLUMNS].copy()
+        lookup["comp_vector_index"] = range(n)
+        store = ArtifactStore(
+            project=INDEX_PROJECT, version=INDEX_VERSION, base_path=str(tmp_path)
+        )
+        buf = io.BytesIO()
+        joblib.dump(index, buf)
+        store.save(INDEX_ARTIFACT_NAME, buf.getvalue())
+        store.save(LOOKUP_ARTIFACT_NAME, lookup)
+        store.save(SCALER_ARTIFACT_NAME, scaler)
+
+        finder = CompFinder(base_path=str(tmp_path))
+        results = finder.find_comps(sales.iloc[5].to_dict(), k=1)
+        assert results[0]["parcel_id"] == sales.iloc[5]["parcel_id"]
+        assert results[0]["distance"] == pytest.approx(0.0, abs=1e-6)
+
+
+    def test_vector_finite_when_transform_emits_nan(self, geo_inactive):
+        """The comp-vector build zero-fills the all-NaN geo block so the
+        vector is finite (and BallTree would accept it)."""
+        sales = _make_synthetic_sales(15)
+        features = CompFinderFeatures()
+        features.fit(comp_feature_template())
+        transformed = features.transform(ensure_feature_inputs(sales))
+        assert transformed[GEO_VELOCITY_FEATURES].isna().all().all()
+        vector = np.atleast_2d(features.build_comp_vector(transformed))
+        assert np.isfinite(vector).all()
+
+
+    def test_identical_property_matches_when_both_active(
+        self, tmp_path, geo_passthrough
+    ):
+        """Exact-self behavior is preserved when the geo family is active
+        (passthrough), i.e. the fail-safe is a no-op."""
+        base_path = str(tmp_path)
+        sales, features_df, store = _publish_index(30, base_path)
+        finder = CompFinder(store=store)
+        prop = features_df.iloc[3].to_dict()
+        results = finder.find_comps(prop, k=3)
+        assert results[0]["distance"] == pytest.approx(0.0)
+        assert results[0]["parcel_id"] == sales.iloc[3]["parcel_id"]
+
+

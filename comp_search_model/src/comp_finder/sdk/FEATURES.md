@@ -73,6 +73,38 @@ When a new feature is needed:
 
 4. **Document the exception** — if the feature is only used by one consumer (not the regressor), add a comment in the consumer's `FeatureSet` class noting the feature and why it's local.
 
+## Inactive Feature Families (fail-safe)
+
+A comp-vector feature **family** (physical / macro / geographic) is **INACTIVE**
+when all of its columns are `NaN` for a given build or query — its backing
+source is unavailable.  The common cases:
+
+- the geographic family when `expected_transaction_price` is not installed in
+  the venv (its derived functions resolve to `None`) or the geographic feature
+  store is down — the 12 geo columns emit `NaN`;
+- the macro family in the comp-finder venv, because the combined sales loader
+  never joins FRED indicators (the columns are absent).
+
+`BallTree` rejects `NaN`, so an inactive family would otherwise crash both
+`CompSearchPipeline.run()` (at `BallTree.fit`) and `CompFinder.find_comps()`
+(at `BallTree.query`, "Input contains NaN").
+
+**Policy (Ticket 6b):** at *both* build and query time, `build_comp_vector()`
+detects any all-`NaN` family and pins its comp-vector block to `0.0` after
+standardization.  A constant (zero) block contributes nothing to pairwise
+distance, so the active families still drive matching and the query answers
+instead of raising.  The inactive families are logged
+(`build_comp_vector: inactive feature families zeroed: ...`).
+
+This is a **no-op when no family is inactive** — with no `NaN` anywhere the
+output is byte-identical to a plain standardization.  It matches the semantics
+`experiments/comp_quality.py` already uses.
+
+**Not handled here:** per-row `NaN` inside an otherwise *active* family (e.g.
+one sale missing `beds`).  That would need per-column imputation medians
+persisted alongside the index (Option 2 in Ticket 6b) and is tracked as a
+separate follow-up if it becomes a real issue.
+
 ## Future Models
 
 Any new model added to this workspace should follow the same pattern:

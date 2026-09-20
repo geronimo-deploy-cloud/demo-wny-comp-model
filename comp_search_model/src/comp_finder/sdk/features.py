@@ -8,9 +8,15 @@ installed, local fallback copies are used (for standalone testing).
 
 Categorical features are excluded from the comp vector by design.
 
-See [FEATURES.md](./FEATURES.md) for the full feature ownership policy.
+When a whole feature family is unavailable its columns are all-NaN and the
+family is treated as INACTIVE: ``build_comp_vector`` zero-fills it (after
+standardization) so it contributes nothing to distance instead of crashing
+``BallTree`` on NaN — applied identically at index-build and query time.
+See [FEATURES.md](./FEATURES.md) for the inactive-family fail-safe and the
+full feature ownership policy.
 """
 
+import logging
 from typing import Optional
 
 import numpy as np
@@ -18,6 +24,8 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 from geronimo.features import FeatureSet, Feature
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Canonical feature lists — imported from expected-transaction-price.
@@ -86,6 +94,47 @@ DEFAULT_FAMILY_WEIGHTS = {
     "macro": 1.0,
     "geographic": 1.0,
 }
+
+#: Comp-vector feature families in vector order.  Used by the
+#: inactive-family fail-safe in ``build_comp_vector`` and by family
+#: weighting.  Keys match ``DEFAULT_FAMILY_WEIGHTS``.
+FAMILY_FEATURE_COLUMNS = {
+    "physical": PHYSICAL_FEATURES,
+    "macro": MACRO_FEATURES,
+    "geographic": GEO_VELOCITY_FEATURES,
+}
+
+
+def comp_feature_template() -> pd.DataFrame:
+    """An empty (0-row) frame declaring every comp-vector input column.
+
+    ``FeatureSet.fit()`` only needs the columns to exist — the feature set
+    has no stateful per-column transformers, so a 0-row frame marks it
+    fitted without running any (possibly heavy / networked) derived
+    functions.  Shared by the index build path and ``CompFinder``.
+    """
+    columns = list(ALL_VECTOR_FEATURES) + ["latitude", "longitude"]
+    return pd.DataFrame(columns=dict.fromkeys(columns, np.nan))
+
+
+def ensure_feature_inputs(df: pd.DataFrame) -> pd.DataFrame:
+    """Return ``df`` with any missing macro source column added as an
+    all-NaN column, so ``transform()`` does not raise for the macro family
+    when its input is absent (the combined sales loader never populates FRED
+    indicators).  A missing macro column then flows through as an all-NaN
+    family and is zero-filled by the ``build_comp_vector`` inactive-family
+    fail-safe.  Physical columns are deliberately NOT added — a missing
+    physical measurement is a genuine input error and should still raise.
+    The caller's frame is not mutated.
+    """
+    missing = [c for c in MACRO_FEATURES if c not in df.columns]
+    if not missing:
+        return df
+    out = df.copy()
+    for c in missing:
+        out[c] = np.nan
+    return out
+
 
 # ArtifactStore keys for the persisted scaler.
 SCALER_ARTIFACT_NAME = "comp_vector_scaler"
@@ -346,6 +395,18 @@ class CompFinderFeatures(FeatureSet):
             A 1-D numpy array of fixed length equal to len(ALL_VECTOR_FEATURES),
             suitable for distance-based nearest-neighbor search.
 
+        Note:
+            A feature family whose columns are *entirely* NaN in ``df`` is
+            treated as INACTIVE (its backing source is unavailable — e.g.
+            the geographic feature store is down, or the regressor package
+            that supplies its derived functions is not installed) and its
+            comp-vector block is pinned to 0.0 (after standardization), so it
+            contributes nothing to distance instead of crashing ``BallTree``
+            on NaN.  This is a no-op — and the output byte-identical to a
+            plain standardization — when no family is inactive.  Per-row NaN
+            inside an otherwise active family is NOT imputed here (out of
+            scope).
+
         Raises:
             ValueError: If required features are missing from df.
         """
@@ -367,6 +428,24 @@ class CompFinderFeatures(FeatureSet):
                 "Provide at least one row of features."
             )
 
+        # Fail-safe: detect inactive feature families.  A family whose
+        # columns are entirely NaN has an unavailable backing source (e.g.
+        # the geographic feature store is down or the regressor package that
+        # supplies its derived fns is not installed).  BallTree rejects NaN,
+        # so such a family is zeroed below (zero contribution to pairwise
+        # distance).  No family is inactive when nothing is NaN, keeping
+        # active-family behavior byte-identical to a plain standardization.
+        inactive_families = [
+            family
+            for family, cols in FAMILY_FEATURE_COLUMNS.items()
+            if df[cols].isna().all().all()
+        ]
+        if inactive_families:
+            logger.warning(
+                "build_comp_vector: inactive feature families zeroed: %s",
+                ", ".join(inactive_families),
+            )
+
         # Extract feature columns in the defined order.
         vector = df[ALL_VECTOR_FEATURES].values.astype(np.float64)
 
@@ -377,15 +456,19 @@ class CompFinderFeatures(FeatureSet):
         # Apply per-family weights along the feature axis (``...`` keeps
         # this correct for both a single-row 1-D vector and an N-row
         # matrix — indexing ``vector[offset:offset+n]`` directly would
-        # slice DATA ROWS for a 2-D input).
+        # slice DATA ROWS for a 2-D input).  Inactive families are pinned to
+        # exactly 0.0 here (after standardization), which also shields the
+        # index from a scaler whose parameters are themselves NaN for a
+        # column that was all-NaN when the scaler was fit.
         offset = 0
-        for family_name, feature_names, weight in [
-            ("physical", PHYSICAL_FEATURES, family_weights.get("physical", 1.0)),
-            ("macro", MACRO_FEATURES, family_weights.get("macro", 1.0)),
-            ("geographic", GEO_VELOCITY_FEATURES, family_weights.get("geographic", 1.0)),
-        ]:
+        for family_name, feature_names in FAMILY_FEATURE_COLUMNS.items():
             n_features = len(feature_names)
-            vector[..., offset : offset + n_features] *= weight
+            if family_name in inactive_families:
+                vector[..., offset : offset + n_features] = 0.0
+            else:
+                vector[..., offset : offset + n_features] *= family_weights.get(
+                    family_name, 1.0
+                )
             offset += n_features
 
         # Squeeze to 1-D for single-row inputs.
