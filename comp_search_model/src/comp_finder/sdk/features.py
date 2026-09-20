@@ -374,11 +374,10 @@ class CompFinderFeatures(FeatureSet):
         if self._comp_vector_scaler is not None:
             vector = self._comp_vector_scaler.transform(vector)
 
-        # Squeeze to 1-D for single-row inputs.
-        if vector.ndim == 2 and vector.shape[0] == 1:
-            vector = vector.squeeze(axis=0)
-
-        # Apply per-family weights.
+        # Apply per-family weights along the feature axis (``...`` keeps
+        # this correct for both a single-row 1-D vector and an N-row
+        # matrix — indexing ``vector[offset:offset+n]`` directly would
+        # slice DATA ROWS for a 2-D input).
         offset = 0
         for family_name, feature_names, weight in [
             ("physical", PHYSICAL_FEATURES, family_weights.get("physical", 1.0)),
@@ -386,8 +385,12 @@ class CompFinderFeatures(FeatureSet):
             ("geographic", GEO_VELOCITY_FEATURES, family_weights.get("geographic", 1.0)),
         ]:
             n_features = len(feature_names)
-            vector[offset : offset + n_features] *= weight
+            vector[..., offset : offset + n_features] *= weight
             offset += n_features
+
+        # Squeeze to 1-D for single-row inputs.
+        if vector.ndim == 2 and vector.shape[0] == 1:
+            vector = vector.squeeze(axis=0)
 
         return vector
 

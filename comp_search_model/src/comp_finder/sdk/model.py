@@ -1,14 +1,21 @@
 """Model definition for comp-finder.
 
-Integrates with expected-transaction-price's feature set to produce a
-standardized comp vector suitable for nearest-neighbor comparison.
+Two classes live here (the Geronimo SDK standardizes on model.py):
 
-The comp vector scaler is persisted via ArtifactStore during `save()`
-and restored during `load()`, following the same pattern used by
-`expected-transaction-price` for its XGBoost estimator.
+- ``CompFinderModel`` — the Geronimo Model.  Integrates with
+  expected-transaction-price's feature set to produce a standardized
+  comp vector; persists the comp vector scaler via ArtifactStore during
+  ``save()`` and restores it during ``load()``.
+- ``CompFinder`` — the query interface for the comp-vector
+  nearest-neighbor index.  Loads the index / lookup / scaler artifacts
+  from ArtifactStore and exposes ``find_comps(property_features, k)``.
 """
 
-from typing import Any, Optional
+import math
+from io import BytesIO
+from typing import Any, Optional, Union
+
+import joblib
 import numpy as np
 import pandas as pd
 
@@ -21,7 +28,15 @@ from .features import (
     SCALER_VERSION,
     ALL_VECTOR_FEATURES,
     DEFAULT_FAMILY_WEIGHTS,
+    MACRO_FEATURES,
+    PHYSICAL_FEATURES,
     get_comp_vector_info,
+)
+from ..pipeline import (
+    INDEX_ARTIFACT_NAME,
+    INDEX_PROJECT,
+    INDEX_VERSION,
+    LOOKUP_ARTIFACT_NAME,
 )
 from sklearn.preprocessing import StandardScaler
 
@@ -208,3 +223,187 @@ class CompFinderModel(Model):
     def is_fitted(self) -> bool:
         """Check if model is trained and ready for predictions."""
         return self._is_fitted
+
+
+# ---------------------------------------------------------------------------
+# CompFinder — query interface for the comp-vector nearest-neighbor index
+# ---------------------------------------------------------------------------
+
+#: Default number of comps to return from ``find_comps()``.
+DEFAULT_K = 5
+
+
+def _clean_scalar(value: Any) -> Any:
+    """Convert a lookup-table cell to a JSON-friendly scalar.
+
+    NaN/NaT become None; numpy scalars are unwrapped; everything else
+    passes through unchanged.
+    """
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if pd.isna(value):
+        return None
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+class CompFinder:
+    """Query the precomputed comp-vector index for nearest historical sales.
+
+    On initialization, loads the BallTree index, the lookup table, and
+    the fitted comp-vector scaler from the ``comp-finder`` ArtifactStore
+    (project / version "1.0.0") — the same artifacts the index batch
+    pipeline publishes and the same store the Ticket-1 scaler lives in.
+
+    Args:
+        store: Optional pre-built ArtifactStore.  When omitted, a store
+            for project ``comp-finder`` version ``1.0.0`` is created
+            (using ``base_path`` if given).
+        base_path: Base directory for a local ArtifactStore (mainly
+            useful in tests / local development).
+
+    No HTTP or MCP surface is defined here — this is the query logic
+    only, consumed directly (e.g. in tests or by a future endpoint
+    ticket).
+    """
+
+    def __init__(
+        self,
+        store: Optional[ArtifactStore] = None,
+        base_path: Optional[str] = None,
+    ):
+        if store is None:
+            store = ArtifactStore(
+                project=INDEX_PROJECT, version=INDEX_VERSION, base_path=base_path
+            )
+        self._store = store
+
+        # The index artifact was saved as joblib-serialized bytes (see
+        # CompSearchPipeline._publish); deserialize it here.
+        index_bytes = self._store.get(INDEX_ARTIFACT_NAME)
+        self._index = joblib.load(BytesIO(index_bytes))
+
+        # The lookup table is stored as a DataFrame and comes back as one.
+        self._lookup_df: pd.DataFrame = self._store.get(LOOKUP_ARTIFACT_NAME)
+
+        # The fitted scaler from Ticket 1 (saved by CompFinderModel).
+        scaler: StandardScaler = self._store.get(SCALER_ARTIFACT_NAME)
+        self.features = CompFinderFeatures()
+        # FeatureSet requires fit() before transform(); there are no
+        # stateful transformers, so an empty frame declaring every
+        # feature column is all that's needed to mark the set as fitted.
+        self.features.fit(self._fit_template())
+        self.features.set_scaler(scaler)
+
+    def _fit_template(self) -> pd.DataFrame:
+        """An empty frame declaring every feature column (fit is a no-op
+        marker — the feature set has no stateful transformers)."""
+        columns = dict.fromkeys(
+            list(PHYSICAL_FEATURES) + list(MACRO_FEATURES) + list(ALL_VECTOR_FEATURES)
+            + ["latitude", "longitude"],
+            np.nan,
+        )
+        return pd.DataFrame(columns=columns)
+
+    @property
+    def population_size(self) -> int:
+        """Number of historical sales in the index.
+
+        ``find_comps(k)`` returns at most ``min(k, population_size)``
+        results — a requested ``k`` larger than this is the clear reason
+        for a shorter result list.
+        """
+        return len(self._lookup_df)
+
+    def find_comps(
+        self,
+        property_features: Union[dict, pd.DataFrame],
+        k: int = DEFAULT_K,
+    ) -> list[dict]:
+        """Find the k nearest historical comparable sales.
+
+        The property's features are run through the same
+        ``CompFinderFeatures`` transform + ``build_comp_vector()`` used
+        to build the historical index, then the precomputed BallTree is
+        queried for the k nearest historical sales.
+
+        Args:
+            property_features: A dict (one property) or a one-row
+                DataFrame with the property's raw feature values — the
+                same columns a historical sales record carries (physical
+                attributes, macro indicators, latitude/longitude, and
+                optionally the geo velocity features).
+            k: Number of comps to return.  Defaults to ``DEFAULT_K``
+                (5).  At most ``min(k, population_size)`` results are
+                returned; requesting more than the historical population
+                yields the full population, nearest first.
+
+        Returns:
+            A ranked list (nearest first) of dicts, each with:
+            ``rank``, ``address``, ``city``, ``zip_code``,
+            ``parcel_id``, ``print_key``, ``sale_price``,
+            ``sale_date`` (ISO 8601 string), ``latitude``,
+            ``longitude``, ``distance`` (raw euclidean distance in the
+            standardized comp-vector space), and ``similarity``
+            (``1 / (1 + distance)``, so 1.0 = identical, higher is
+            more similar).
+
+        Raises:
+            ValueError: If ``k`` is not a positive integer, or required
+                feature columns are missing from ``property_features``.
+        """
+        if not isinstance(k, int) or isinstance(k, bool) or k < 1:
+            raise ValueError(f"k must be a positive integer, got {k!r}")
+
+        if isinstance(property_features, dict):
+            df = pd.DataFrame([property_features])
+        elif isinstance(property_features, pd.DataFrame):
+            df = property_features
+        else:
+            raise TypeError(
+                "property_features must be a dict or a one-row DataFrame, "
+                f"got {type(property_features).__name__}"
+            )
+
+        features_df = self.features.transform(df)
+        vector = np.asarray(
+            self.features.build_comp_vector(features_df), dtype=np.float64
+        ).reshape(1, -1)
+
+        # BallTree rejects k > n_samples; cap it.  The population size is
+        # taken from the lookup table, which is parallel to the index.
+        effective_k = min(k, self.population_size)
+        if effective_k == 0:
+            return []
+
+        distances, indices = self._index.query(vector, k=effective_k)
+
+        results = []
+        for rank, (distance, idx) in enumerate(zip(distances[0], indices[0]), start=1):
+            results.append(
+                self._format_result(rank, float(distance), self._lookup_df.iloc[idx])
+            )
+        return results
+
+    def _format_result(self, rank: int, distance: float, row: pd.Series) -> dict:
+        """Build one result dict from a lookup-table row and its distance."""
+        sale_date = _clean_scalar(row.get("sale_date"))
+        if hasattr(sale_date, "isoformat"):
+            sale_date = sale_date.isoformat()
+        return {
+            "rank": rank,
+            "address": _clean_scalar(row.get("address")),
+            "city": _clean_scalar(row.get("city")),
+            "zip_code": _clean_scalar(row.get("zip_code")),
+            "parcel_id": _clean_scalar(row.get("parcel_id")),
+            "print_key": _clean_scalar(row.get("print_key")),
+            "sale_price": _clean_scalar(row.get("sale_price")),
+            "sale_date": sale_date,
+            "latitude": _clean_scalar(row.get("latitude")),
+            "longitude": _clean_scalar(row.get("longitude")),
+            "distance": distance,
+            "similarity": 1.0 / (1.0 + distance),
+        }
