@@ -7,7 +7,8 @@ Nearest-neighbor index for comparable sales. A weekly batch pipeline builds a Ba
 ## Quick Start
 
 ```bash
-# Install dependencies
+# Install dependencies (pulls the sibling expected_transaction_price
+# project in as an editable path dependency — see Dependencies below)
 uv sync
 
 # Build and publish the index locally
@@ -20,6 +21,35 @@ uv run python -m comp_finder.flow run
 uv run pytest
 ```
 
+## Dependencies
+
+`expected_transaction_price` is installed into this project's venv as an
+**editable path dependency** on the sibling workspace directory
+(`[tool.uv.sources]` → `../expected_transaction_price_model`). It is the
+single source of truth for the canonical feature lists and the 12
+geographic-velocity derived functions, so `uv sync` here must run from
+inside the monorepo layout (the sibling checkout must exist at the
+relative path).
+
+### Geographic feature store prerequisite
+
+The geo velocity features resolve H3 cells against the
+`geographic-feature-store` ArtifactStore (project
+`geographic-feature-store`, version `1.0.0`). The artifacts live in the
+local store at `~/.geronimo/artifacts/geographic-feature-store/1.0.0/`
+(the path is set in `~/.geronimo/config.yaml`). Produce them by running
+the producer pipeline once:
+
+```bash
+cd ../geographic_feature_store
+uv run python -m geographic_feature_store.flow run
+```
+
+If the artifacts are missing, every geo feature emits NaN and the
+feature layer treats the geographic family as absent (the features are
+declared `required=False`) — nothing crashes, but index and query
+vectors lose the geographic dimensions.
+
 ## Quality experiments
 
 `src/comp_finder/experiments/comp_quality.py` empirically measures whether the
@@ -30,8 +60,14 @@ comp-vector index finds genuinely comparable sales:
 # a randomized-price negative control. No network access.
 uv run python -m comp_finder.experiments.comp_quality synthetic
 
-# Real Buffalo + Rochester sales (network; cached under /tmp afterwards)
+# Real Buffalo + Rochester sales (network; cached under /tmp afterwards).
+# Geo features come from the geographic feature store (see prerequisite
+# above); macro features are joined from FRED's public CSV endpoint
+# (no API key needed).
 uv run python -m comp_finder.experiments.comp_quality real [--limit N] [--json out.json]
+
+# Reproduce the Ticket-5 physical-only baseline (no store geo, no macro)
+uv run python -m comp_finder.experiments.comp_quality real --physical-only
 ```
 
 - **Holdout price prediction (leave-one-out):** each query sale is removed
@@ -41,8 +77,13 @@ uv run python -m comp_finder.experiments.comp_quality real [--limit N] [--json o
 - **Family ablation:** same protocol under different physical/macro/
   geographic family weights to see which families carry price signal.
 
-In a venv without `expected_transaction_price` the geographic family (and, on
-real data, the macro family) is inactive and zeroed; the report says so.
+With the regressor package installed (the default after `uv sync`), `real`
+mode reports no INACTIVE families and runs all six ablation configurations.
+Where `expected_transaction_price` is absent, or the feature-store artifacts
+are missing, the geographic family falls back to zeroed/INACTIVE (and on
+real data, macro likewise when the FRED fetch fails); the report says so and
+nothing crashes. Before/after reports for the geo activation (Ticket 7a) are
+committed under `reports/`.
 
 ## Project Structure
 
@@ -63,7 +104,8 @@ comp_search_model/
 │       ├── agent.py               # MCP server
 │       ├── train.py
 │       └── monitoring/
-└── tests/
+├── tests/
+└── reports/               # committed comp_quality JSON (before/after)
 ```
 
 ## Feature Ownership
@@ -72,6 +114,9 @@ comp_search_model/
 See [sdk/FEATURES.md](src/comp_finder/sdk/FEATURES.md) for the full policy on how
 to add features, handle exceptions, and avoid drift between models.
 
-If `expected_transaction_price` is not installed in this project's venv, local
-fallback copies of the feature lists are used and the 12 geographic velocity
-features silently return NaN — see the comments in `sdk/features.py`.
+If `expected_transaction_price` is not installed in this venv (i.e. the path
+dependency above could not be resolved), local fallback copies of the feature
+lists are used and the 12 geographic velocity features silently return NaN —
+see the comments in `sdk/features.py`. With the package installed, geo features
+return values wherever the geographic feature store covers the property's H3
+cell; the `real` experiments report which families are active.
