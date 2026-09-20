@@ -33,15 +33,22 @@ Experiments
 
 Caveats (surfaced in the output):
 - The 12 geographic velocity features are derived functions resolved
-  from ``expected_transaction_price``.  In environments where that
-  package is absent they emit NaN, and this script treats the
-  geographic family as INACTIVE: NaNs are replaced with 0.0
-  pre-standardization (zero contribution) and ablation configs that
-  use the family are skipped.  Synthetic mode injects synthetic geo
-  values via the same identity-passthrough mechanism the tests use
-  (see the ``geo_passthrough`` fixture in tests/test_finder.py).
-- Macro features are likewise zeroed when absent from the input (the
-  combined loader does not join FRED data).
+  from ``expected_transaction_price`` (a path dependency of this
+  project since Ticket 7b).  When installed, real mode resolves the
+  columns once per population against the geographic feature store
+  (``resolve_geo_columns``; see README for the prerequisite).  In
+  environments where the package is absent they emit NaN, and this
+  script treats the geographic family as INACTIVE: NaNs are replaced
+  with 0.0 pre-standardization (zero contribution) and ablation
+  configs that use the family are skipped.  Synthetic mode injects
+  synthetic geo values via the same identity-passthrough mechanism the
+  tests use (see the ``geo_passthrough`` fixture in
+  tests/test_finder.py).
+- Macro features are joined from FRED at load time using the
+  ``expected_transaction_price`` data-source loader (now a path
+  dependency of this project).  Without a ``FRED_API_KEY`` in the
+  environment the loader returns no rows and the macro family falls
+  back to zeroed/INACTIVE.
 - Query rows with missing feature values are imputed with the same
   per-column population medians used when building the index, so a
   query vector always matches how its population row was treated.
@@ -85,6 +92,7 @@ from ..sdk.features import (
     MACRO_FEATURES,
     PHYSICAL_FEATURES,
     SCALER_ARTIFACT_NAME,
+    _geo_vol_r1_w90,
 )
 from ..sdk.model import CompFinder
 
@@ -118,10 +126,12 @@ def install_geo_passthrough():
     """Install identity passthroughs on the geo derived features.
 
     The real derived functions resolve H3 cells against the geographic
-    feature store (an optional dependency); when it is unavailable they
-    emit NaN, which crashes BallTree.  Passthroughs let an input column
-    flow through unchanged — synthetic mode fills those columns, and
-    real mode ends up with NaN -> 0.0 (see prepare_population).
+    feature store; synthetic mode carries its own geo columns, and real
+    mode's columns are materialized once by ``resolve_geo_columns`` —
+    in both cases passthroughs let those values flow through unchanged.
+    Without the regressor package installed the columns are absent,
+    resolve is skipped, and the family ends up NaN -> 0.0 / INACTIVE
+    (see prepare_population).
 
     Returns:
         A zero-argument restore callable that puts the original
@@ -139,6 +149,30 @@ def install_geo_passthrough():
             CompFinderFeatures.__dict__[name]._derived_feature_fn = fn
 
     return restore
+
+
+def resolve_geo_columns(population: pd.DataFrame) -> pd.DataFrame:
+    """Materialize the 12 geo velocity columns for every population row.
+
+    Runs the population through the *real* H3-lookup derived functions
+    (imported from ``expected_transaction_price`` since Ticket 7b; see
+    README for the geographic-feature-store prerequisite) and attaches
+    the resolved columns to the population.  Once attached, the
+    experiments' geo passthroughs carry these store-resolved values
+    instead of re-looking-up on every transform — which would emit NaN
+    for properties outside the published grid (BallTree rejects NaN
+    vectors).  Unresolved cells are already median-imputed by
+    prepare_population, exactly as the index build treats them.
+    """
+    _, transformed, inactive, _ = prepare_population(population)
+    out = population.copy()
+    for col in GEO_VELOCITY_FEATURES:
+        out[col] = transformed[col].to_numpy()
+    if "geographic" in inactive:
+        # Store artifacts missing → keep the family honestly INACTIVE
+        # (0.0 would masquerade as resolvable data downstream).
+        out[GEO_VELOCITY_FEATURES] = np.nan
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +556,41 @@ def generate_synthetic_population(n: int = 800, seed: int = 42,
 # Real population loader
 # ---------------------------------------------------------------------------
 
+def _join_macro_economic(df: pd.DataFrame) -> pd.DataFrame:
+    """Join the four FRED macro columns onto the population by sale date.
+
+    Reuses the regressor project's existing loader (``expected_transaction_price``
+    is a path dependency of this project); needs ``FRED_API_KEY`` in the
+    environment.  On any failure the population is returned unchanged and
+    the macro family reports INACTIVE.
+    """
+    try:
+        from expected_transaction_price.sdk.data_sources import (
+            _load_macro_economic_data,
+        )
+        macro = _load_macro_economic_data()
+    except Exception as e:
+        logger.warning("Macro load failed; macro family will be INACTIVE: %s", e)
+        return df
+    if macro.empty:
+        logger.warning("FRED macro data empty (is FRED_API_KEY set?); "
+                       "macro family will be INACTIVE")
+        return df
+
+    left = df.copy()
+    left["_ord"] = np.arange(len(left))
+    left["_sd"] = pd.to_datetime(left["sale_date"], errors="coerce")
+    right = macro[["sale_date"] + MACRO_FEATURES].copy()
+    right["_sd"] = pd.to_datetime(right["sale_date"], errors="coerce")
+    merged = pd.merge_asof(
+        left.sort_values("_sd"), right[["_sd"] + MACRO_FEATURES],
+        on="_sd", direction="backward",
+    )
+    merged = merged.sort_values("_ord").drop(columns=["_ord", "_sd"])
+    logger.info("Joined FRED macro data (%d daily rows) onto population", len(macro))
+    return merged.reset_index(drop=True)
+
+
 def load_real_population(limit: int = 0, cache_path: Path = DEFAULT_CACHE_PATH) -> pd.DataFrame:
     """Load (or read from cache) the combined Buffalo + Rochester sales.
 
@@ -549,6 +618,8 @@ def load_real_population(limit: int = 0, cache_path: Path = DEFAULT_CACHE_PATH) 
     ]
     logger.info("Population filter ($100k-$600k, >2022-01-01): %d -> %d sales", before, len(df))
 
+    df = _join_macro_economic(df)
+
     if limit and limit < len(df):
         df = df.sample(limit, random_state=0)
     return df.reset_index(drop=True)
@@ -566,6 +637,11 @@ def run_all(population: pd.DataFrame, n_queries: int, k: int, seed: int) -> dict
 
     if len(population) <= k + 1:
         raise SystemExit(f"Not enough query rows ({len(population)}).")
+
+    if _geo_vol_r1_w90 is not None and not set(GEO_VELOCITY_FEATURES) <= set(population.columns):
+        logger.info("Resolving geographic velocity features from the feature store for %d sales...", len(population))
+        population = resolve_geo_columns(population)
+
     rng = np.random.default_rng(seed)
     query_positions = sorted(
         int(p) for p in rng.choice(len(population), size=min(n_queries, len(population)), replace=False)
