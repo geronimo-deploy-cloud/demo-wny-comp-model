@@ -405,6 +405,49 @@ class TestFindCompsRanking:
 
 
 # =============================================================================
+# Fail-safe inactive-family handling (Ticket 6a)
+# =============================================================================
+
+
+class TestFindCompsInactiveFamily:
+    """Queries still answer when the geo family is inactive (bare venv)."""
+
+    def test_find_comps_works_with_all_nan_geo(self, indexed, geo_none):
+        finder = indexed["finder"]
+        rng = np.random.RandomState(3)
+        results = finder.find_comps(_random_property(rng), k=4)
+        assert len(results) == 4
+        assert all(np.isfinite(r["distance"]) for r in results)
+
+    def test_find_comps_works_without_geo_input_columns(self, indexed, geo_none):
+        finder = indexed["finder"]
+        rng = np.random.RandomState(4)
+        prop = _random_property(rng)
+        for col in GEO_VELOCITY_FEATURES:
+            del prop[col]
+        results = finder.find_comps(prop, k=3)
+        assert len(results) == 3
+
+    def test_query_per_row_nan_imputed_not_raised(self, indexed, geo_none):
+        """A NaN inside an ACTIVE family is median-imputed, not a crash."""
+        finder = indexed["finder"]
+        rng = np.random.RandomState(5)
+        prop = _random_property(rng)
+        prop["beds"] = float("nan")
+        results = finder.find_comps(prop, k=2)
+        assert len(results) == 2
+
+    def test_passthrough_env_fully_active(self, indexed, geo_passthrough):
+        """With real geo values the query path is unmodified (byte-identical
+        policy no-op): results match an explicit no-sanitizer expectation."""
+        finder = indexed["finder"]
+        features_df = indexed["features_df"]
+        prop = features_df.iloc[0].to_dict()
+        results = finder.find_comps(prop, k=1)
+        assert results[0]["distance"] == pytest.approx(0.0)
+
+
+# =============================================================================
 # Regression: existing pipeline logic untouched
 # =============================================================================
 

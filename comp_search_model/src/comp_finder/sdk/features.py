@@ -8,9 +8,19 @@ installed, local fallback copies are used (for standalone testing).
 
 Categorical features are excluded from the comp vector by design.
 
+Fail-safe NaN policy (Ticket 6a): a feature family whose columns are
+entirely NaN (e.g. the geographic family in a venv without
+``expected_transaction_price``, or when the geo feature store is down) is
+declared INACTIVE and zero-filled at both index-build and query time, so
+it contributes nothing to comp-vector distance.  Per-row NaNs inside
+otherwise-active families are imputed with per-column population medians
+computed at build time and persisted alongside the index.  When no NaNs
+are present anywhere the policy is a no-op.  See FEATURES.md.
+
 See [FEATURES.md](./FEATURES.md) for the full feature ownership policy.
 """
 
+import logging
 from typing import Optional
 
 import numpy as np
@@ -80,12 +90,25 @@ except ImportError:
     ]
     ALL_VECTOR_FEATURES = PHYSICAL_FEATURES + MACRO_FEATURES + GEO_VELOCITY_FEATURES
 
+logger = logging.getLogger(__name__)
+
 # Default per-family weight multipliers (applied after standardization).
 DEFAULT_FAMILY_WEIGHTS = {
     "physical": 1.0,
     "macro": 1.0,
     "geographic": 1.0,
 }
+
+#: Comp-vector feature families, in vector layout order.
+FAMILY_FEATURES = {
+    "physical": PHYSICAL_FEATURES,
+    "macro": MACRO_FEATURES,
+    "geographic": GEO_VELOCITY_FEATURES,
+}
+
+#: Families sourced from external stores (FRED, the geo feature store)
+#: that may be unavailable in some environments.
+EXTERNAL_STORE_FEATURES = list(MACRO_FEATURES) + list(GEO_VELOCITY_FEATURES)
 
 # ArtifactStore keys for the persisted scaler.
 SCALER_ARTIFACT_NAME = "comp_vector_scaler"
@@ -143,6 +166,91 @@ def get_comp_vector_info() -> dict:
         "family_weights": dict(DEFAULT_FAMILY_WEIGHTS),
         "categorical_handling": get_feature_categories(),
     }
+
+
+def ensure_store_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Add missing macro/geo comp-vector columns as NaN before transform.
+
+    These families come from external stores (FRED, the geographic
+    feature store) that can be unavailable in a given environment;
+    ``FeatureSet.transform()`` requires every declared numeric column to
+    be present, so an absent store is materialized as all-NaN columns and
+    then handled by ``sanitize_comp_features()`` (inactive → zero-filled).
+    Physical features are NOT added — they must be supplied by the caller,
+    and transform()'s missing-feature error is the honest contract there.
+    """
+    missing = [c for c in EXTERNAL_STORE_FEATURES if c not in df.columns]
+    if not missing:
+        return df
+    out = df.copy()
+    for col in missing:
+        out[col] = np.nan
+    return out
+
+
+def sanitize_comp_features(
+    features_df: pd.DataFrame,
+    imputation_medians: Optional[dict] = None,
+) -> tuple[pd.DataFrame, list[str], dict[str, float]]:
+    """Apply the fail-safe NaN policy to a ``transform()`` output.
+
+    A family whose columns are entirely NaN is declared INACTIVE (the
+    regressor package is missing, the geo feature store is down, macro
+    data was never joined, ...) and zero-filled so it contributes nothing
+    to comp-vector distance.  Remaining per-row NaNs inside active
+    families are imputed with per-column medians — supplied by the caller
+    at query time (persisted at index build) or computed from the
+    population itself at build time.  With no NaNs anywhere this is a
+    no-op (values pass through byte-identical).
+
+    Zero-fill happens before standardization, so the same policy must be
+    applied to both index build and query vectors for distances to stay
+    meaningful.
+
+    Args:
+        features_df: DataFrame produced by ``CompFinderFeatures.transform()``
+            containing the ``ALL_VECTOR_FEATURES`` columns.
+        imputation_medians: Optional per-column medians (raw units) from a
+            previous build, used to impute NaNs in active families.
+
+    Returns:
+        ``(clean_df, inactive_families, medians)`` — ``clean_df`` is a copy
+        of ``features_df`` with the comp-vector columns sanitized,
+        ``inactive_families`` names the zero-filled families, and
+        ``medians`` maps every comp-vector feature to its imputation
+        median (0.0 for inactive columns).
+    """
+    matrix = features_df[ALL_VECTOR_FEATURES].astype(np.float64).copy()
+
+    inactive: list[str] = []
+    for family, columns in FAMILY_FEATURES.items():
+        if matrix[columns].isna().all(axis=None):
+            inactive.append(family)
+            matrix[columns] = 0.0
+            logger.info(
+                "Feature family %r is inactive (all %d columns NaN); "
+                "zero-filling — it will contribute nothing to comp-vector distance.",
+                family, len(columns),
+            )
+
+    medians = matrix.median()
+    if imputation_medians is not None:
+        provided = pd.Series(imputation_medians, dtype=np.float64).reindex(
+            ALL_VECTOR_FEATURES
+        )
+        medians = provided.fillna(medians)
+    medians = medians.fillna(0.0)
+
+    n_nans = int(matrix.isna().sum().sum())
+    if n_nans:
+        logger.info(
+            "Imputing %d remaining NaN feature values with column medians.", n_nans
+        )
+        matrix = matrix.fillna(medians)
+
+    clean_df = features_df.copy()
+    clean_df[ALL_VECTOR_FEATURES] = matrix.to_numpy()
+    return clean_df, inactive, medians.to_dict()
 
 # Import geo velocity derived feature functions from the existing
 # expected-transaction-price feature set so the comp-finder uses the
