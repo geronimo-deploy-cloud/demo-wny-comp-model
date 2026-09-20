@@ -2,10 +2,11 @@
 -----------------------------------
 This model is trained on recent residential real estate sales data in the Western NY Region and predicts home sale price based on physical attributes, macro-economic data, and geographic spatiotemporal market data. 
 
-Two producer/consumer Python projects communicate via the Geronimo `ArtifactStore`:
+Three producer/consumer Python projects communicate via the Geronimo `ArtifactStore`:
 
 1. **`geographic_feature_store`** — weekly batch pipeline that precomputes spatiotemporal velocity grids
-2. **`expected-transaction-price`** — realtime XGBoost model serving with a REST endpoint and an MCP server for AI agents
+2. **`expected_transaction_price_model`** — realtime XGBoost model serving with a REST endpoint and an MCP server for AI agents
+3. **`comp_search_model`** — the comp-finder: a weekly batch pipeline that builds a nearest-neighbor index over standardized "comp vectors" of historical sales, plus a `CompFinder` class for querying it
 
 ## Geographic Feature Store
 
@@ -29,7 +30,7 @@ The pipeline outputs **12 velocity artifacts**, one for each (radius, lookback w
 | 5 miles  | 90, 180, 365 days |
 | 10 miles | 180, 365 days    |
 
-At inference time, `expected-transaction-price` loads the 12 artifacts from the `ArtifactStore` (project: `geographic-feature-store`, version: `1.0.0`), indexes them by `h3_index`, and performs O(1) lookups per property coordinate. This decouples the expensive BallTree computation (run weekly in batch) from the low-latency real-time prediction path.
+At inference time, `expected_transaction_price_model` loads the 12 artifacts from the `ArtifactStore` (project: `geographic-feature-store`, version: `1.0.0`), indexes them by `h3_index`, and performs O(1) lookups per property coordinate. This decouples the expensive BallTree computation (run weekly in batch) from the low-latency real-time prediction path.
 
 ## Comp Model
 

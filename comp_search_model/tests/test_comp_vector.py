@@ -224,6 +224,31 @@ class TestFeatureSet:
             vector_default[:n_physical] * 2.0,
         )
 
+    def test_build_comp_vector_weights_apply_per_feature_for_matrices(self, training_df):
+        """Family weights apply along the FEATURE axis for N-row inputs.
+
+        Regression: weights were once applied as ``vector[offset:offset+n]``,
+        which slices DATA ROWS for a 2-D input — masked in production
+        because all weights default to 1.0.
+        """
+        features = CompFinderFeatures()
+        features.fit(training_df)
+        weights = {"physical": 1.0, "macro": 0.0, "geographic": 1.0}
+        matrix = features.build_comp_vector(training_df, family_weights=weights)
+        assert matrix.shape == (len(training_df), len(ALL_VECTOR_FEATURES))
+        n_physical = len(PHYSICAL_FEATURES)
+        n_macro = len(MACRO_FEATURES)
+        # The zero-weighted family is zeroed in every row.
+        np.testing.assert_array_equal(
+            matrix[:, n_physical : n_physical + n_macro], 0.0
+        )
+        # Every row matches the corresponding single-row call.
+        for i in range(len(training_df)):
+            row_vector = features.build_comp_vector(
+                training_df.iloc[i : i + 1], family_weights=weights
+            )
+            np.testing.assert_array_almost_equal(matrix[i], row_vector)
+
     def test_build_comp_vector_missing_features_raises(self, sample_features_df):
         """Missing required features raises ValueError."""
         features = CompFinderFeatures()

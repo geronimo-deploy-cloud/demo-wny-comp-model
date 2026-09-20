@@ -4,13 +4,16 @@ This file provides guidance to AI Agents when working with code in this reposito
 
 ## Repository layout
 
-This is a **multi-project workspace** with two sibling Geronimo-generated Python projects that are coupled at runtime via the Geronimo `ArtifactStore`. The top-level `pyproject.toml` is essentially a stub — real work happens inside the subdirectories, each of which has its own `.venv/`, `pyproject.toml`, `uv.lock`, and `geronimo.yaml`.
+This is a **multi-project workspace** with three sibling Geronimo-generated Python projects that are coupled at runtime via the Geronimo `ArtifactStore`. The top-level `pyproject.toml` is essentially a stub — real work happens inside the subdirectories, each of which has its own `.venv/`, `pyproject.toml`, and `uv.lock`.
 
 ```
 wny_real_estate_comp_model/
-├── expected-transaction-price/  # realtime FastAPI + XGBoost regressor (consumer)
-└── geographic_feature_store/    # weekly Metaflow batch pipeline (producer)
+├── expected_transaction_price_model/  # realtime FastAPI + XGBoost regressor (consumer)
+├── geographic_feature_store/          # weekly Metaflow batch pipeline (producer)
+└── comp_search_model/                 # comp-finder: comp-vector index batch pipeline + CompFinder query
 ```
+
+**Naming map for the comp-finder project** (tickets/docs frequently say "comp_model"): directory `comp_search_model/`, Python package `comp_finder`, ArtifactStore project `comp-finder` (hyphen).
 
 **Always `cd` into the project subdirectory** before running `uv` commands — each project has its own lockfile and virtualenv.
 
@@ -25,7 +28,7 @@ uv sync
 # Add new deps for either project
 uv add <package_name/>
 
-# expected-transaction-price (realtime serving)
+# expected_transaction_price_model (realtime serving)
 uv run uvicorn expected_transaction_price.app:app --reload          # API on :8000, MCP on /mcp
 uv run python -m expected_transaction_price.train                    # train and save to ArtifactStore
 uv run python -m expected_transaction_price.agent                    # MCP server via stdio
@@ -37,20 +40,24 @@ uv run python -m geographic_feature_store.flow run                       # run p
 uv run python -m geographic_feature_store.train                          # one-shot train+save
 uv run python -m geographic_feature_store.flow step-functions create     # deploy
 uv run pytest
+
+# comp_search_model (comp-finder index + query)
+uv run python -m comp_finder.flow run        # build and publish the comp-vector index
+uv run pytest
 ```
 
-`expected-transaction-price` reads `FRED_API_KEY` from `expected-transaction-price/.env` for FRED macro data; without it, macro features come back empty (training still works).
+`expected_transaction_price_model` reads `FRED_API_KEY` from its `.env` for FRED macro data; without it, macro features come back empty (training still works).
 
 ## Architecture
 
 ### Producer/consumer coupling via ArtifactStore
 
-`geographic_feature_store` is the **producer** and `expected-transaction-price` is the **consumer**. They never call each other directly — coordination happens entirely through Geronimo's `ArtifactStore`, keyed by project name and version:
+`geographic_feature_store` is the **producer** and `expected_transaction_price_model` is the **consumer**. They never call each other directly — coordination happens entirely through Geronimo's `ArtifactStore`, keyed by project name and version:
 
 - The batch pipeline writes 12 velocity grids (`geo_velocity_r{R}_w{W}` for R∈{1,5,10} miles, W∈{30,90,180,365} days) plus a `features_config` artifact under `project="geographic-feature-store", version="1.0.0"`.
-- `expected-transaction-price`'s feature transform calls `ArtifactStore(project="geographic-feature-store", version="1.0.0").get(artifact_name)` and indexes the resulting DataFrame by `h3_index` for O(1) lookup at training and inference time. See `expected-transaction-price/src/expected_transaction_price/sdk/features.py` — `_load_geo_velocity_store()` and `_h3_lookup()`.
+- `expected_transaction_price_model`'s feature transform calls `ArtifactStore(project="geographic-feature-store", version="1.0.0").get(artifact_name)` and indexes the resulting DataFrame by `h3_index` for O(1) lookup at training and inference time. See `expected_transaction_price_model/src/expected_transaction_price/sdk/features.py` — `_load_geo_velocity_store()` and `_h3_lookup()`.
 
-If you change the producer's artifact names, H3 resolution, or schema, the consumer breaks silently (NaN features). Coordinate both ends — the producer's `GEO_VELOCITY_CONFIGS` (in `geographic_feature_store/.../features.py`) and the consumer's `GEO_VELOCITY_CONFIGS` (in `expected-transaction-price/.../features.py`) must agree.
+If you change the producer's artifact names, H3 resolution, or schema, the consumer breaks silently (NaN features). Coordinate both ends — the producer's `GEO_VELOCITY_CONFIGS` (in `geographic_feature_store/.../features.py`) and the consumer's `GEO_VELOCITY_CONFIGS` (in `expected_transaction_price_model/.../features.py`) must agree.
 
 ### Geronimo SDK conventions
 
@@ -61,15 +68,17 @@ src/<project>/sdk/
 ├── data_sources.py   # DataSource definitions, auto-collected by prefix
 ├── features.py       # FeatureSet declaring Feature(...) attributes
 ├── model.py          # Model subclass implementing train/predict/save/load
-├── endpoint.py       # (expected-transaction-price only) Endpoint with preprocess/postprocess
-└── pipeline.py       # (feature store only) BatchPipeline orchestrating train+save
+├── endpoint.py       # (serving projects) Endpoint with preprocess/postprocess
+├── pipeline.py       # (batch projects) BatchPipeline orchestrating train+save
+└── model.py          # Model subclass; in comp_search_model also hosts the
+                      #   CompFinder nearest-neighbor query class
 ```
 
 **Data sources are auto-collected by name prefix** via `collect_data_sources(sys.modules[__name__], "training_")` and `"production_"` at the bottom of `data_sources.py`. Adding a new source means defining a module-level `training_<name> = DataSource(...)` — no registration needed. `JoinSpec` on a non-primary source describes how it merges onto the first source.
 
 **Features are declarative.** `FeatureSet` classes list `Feature(dtype=...)` class attributes; `dtype='derived'` features supply a `derived_feature_fn` that takes the DataFrame and returns a Series. The `CompModelFeatures.transform()` override exists because Geronimo's base `transform` strips pandas categorical dtypes that XGBoost requires — preserve that behavior when modifying.
 
-### expected-transaction-price specifics
+### expected_transaction_price_model specifics
 
 - **Rochester-only training** with log1p(sale_price) target. Buffalo loaders exist but aren't used by `model.train()` — see the comment block at the top of `sdk/model.py`.
 - `CompModelEndpoint` has a **demo-mode fallback**: if no artifact is found, `initialize()` silently sets `self.model = None` and `handle()` echoes the request back. Untrained deploys serve 200s, not 500s — be aware when debugging.
@@ -82,11 +91,18 @@ src/<project>/sdk/
 - Metro bounds are hardcoded in `sdk/features.py` (`DEFAULT_METRO_BOUNDS` for Buffalo + Rochester).
 - The Metaflow `flow.py` is a thin wrapper — real logic is in `sdk/pipeline.py`'s `GeoFeatureStorePipeline.run()`.
 
+### comp_search_model specifics (comp-finder)
+
+- **ArtifactStore project is `comp-finder` (hyphen), version `1.0.0`.** `CompSearchPipeline` publishes `comp_vector_index` (joblib-serialized BallTree) + `comp_vector_lookup` (DataFrame whose rows are parallel to index points); `CompFinderModel` saves the fitted `StandardScaler` (`comp_vector_scaler`) to the same store. `CompFinder` (`sdk/model.py`) loads all three at startup and exposes `find_comps()`.
+- Canonical feature lists and the geo-velocity derived fns are **imported from `expected_transaction_price.sdk.features`**, with local fallback copies when that package isn't in the venv. In a venv without the regressor project the 12 geo features silently emit NaN — tests compensate by monkeypatching `_derived_feature_fn` (see the `geo_passthrough` fixture in `tests/test_finder.py`).
+- Categorical features are excluded from the comp vector by design (used as match filters instead) — see `sdk/FEATURES.md`.
+- **Quality experiments**: `src/comp_finder/experiments/comp_quality.py` (`synthetic` / `real` subcommands) measures whether the index actually finds comparable sales — leave-one-out holdout price prediction through `CompFinder` vs. median/random baselines, plus a family-weight ablation. In a venv without the regressor project the geographic family (and macro on real data) is inactive and zeroed; the report says so.
+
 ### Data source quirks
 
 - **Buffalo**: Socrata SODA API, paginated by `$offset`, filters to property classes 210–250. Half baths are not split out (hardcoded to 0). Combined training data enforces sale_price ∈ [$100k, $600k] and sale_date > 2022-01-01 for both Buffalo and Rochester after the join.
 - **Rochester**: ArcGIS REST API, paginated by `resultOffset`. Polygon centroids come in **EPSG:3857** and must be reprojected to EPSG:4326 — `_load_rochester_training_data` does this via `pyproj.Transformer`. School districts are assigned via spatial join against the TIGER 2023 NYS UNSD shapefile, cached at `/tmp/tiger_school_districts`. Training data is filtered to sale_price ∈ [$100k, $600k] and sale_date > 2022-01-01.
-- The `UNIFIED_COLUMNS` list in `expected-transaction-price/sdk/data_sources.py` is the contract — every source loader normalizes to that schema before the feature layer sees it.
+- The `UNIFIED_COLUMNS` list in `expected_transaction_price_model/sdk/data_sources.py` is the contract — every source loader normalizes to that schema before the feature layer sees it.
 
 
 # Development Philosophy
