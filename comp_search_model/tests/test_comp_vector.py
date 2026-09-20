@@ -26,8 +26,10 @@ from comp_finder.sdk.features import (
     SCALER_ARTIFACT_NAME,
     SCALER_PROJECT,
     SCALER_VERSION,
+    ensure_store_feature_columns,
     get_feature_categories,
     get_comp_vector_info,
+    sanitize_comp_features,
     CompFinderFeatures,
 )
 from comp_finder.sdk.model import CompFinderModel
@@ -275,6 +277,112 @@ class TestFeatureSet:
         features.set_scaler(scaler)
         vector = features.build_comp_vector(df_with_nan.iloc[:1])
         assert np.isnan(vector[0])  # first feature is NaN
+
+
+# ---------------------------------------------------------------------------
+# Tests: Fail-safe inactive-family NaN policy (Ticket 6a)
+# ---------------------------------------------------------------------------
+
+class TestSanitizeCompFeatures:
+    """Unit tests for sanitize_comp_features (zero-fill + median imputation)."""
+
+    def test_noop_when_no_nans(self, training_df):
+        clean, inactive, medians = sanitize_comp_features(training_df)
+        assert inactive == []
+        np.testing.assert_array_equal(
+            clean[ALL_VECTOR_FEATURES].to_numpy(),
+            training_df[ALL_VECTOR_FEATURES].to_numpy(),
+        )
+        assert set(medians) == set(ALL_VECTOR_FEATURES)
+        assert all(np.isfinite(v) for v in medians.values())
+
+    def test_inactive_geo_family_zero_filled(self, training_df):
+        df = training_df.copy()
+        df[GEO_VELOCITY_FEATURES] = np.nan
+        clean, inactive, medians = sanitize_comp_features(df)
+        assert inactive == ["geographic"]
+        assert (clean[GEO_VELOCITY_FEATURES] == 0.0).all().all()
+        assert all(medians[c] == 0.0 for c in GEO_VELOCITY_FEATURES)
+        # Active families untouched.
+        np.testing.assert_array_equal(
+            clean[PHYSICAL_FEATURES].to_numpy(),
+            df[PHYSICAL_FEATURES].to_numpy(),
+        )
+
+    def test_inactive_macro_family_zero_filled(self, training_df):
+        df = training_df.copy()
+        df[MACRO_FEATURES] = np.nan
+        clean, inactive, _ = sanitize_comp_features(df)
+        assert inactive == ["macro"]
+        assert (clean[MACRO_FEATURES] == 0.0).all().all()
+
+    def test_per_row_nan_imputed_with_column_median(self, training_df):
+        df = training_df.copy()
+        df.loc[1, "total_living_area"] = np.nan
+        clean, inactive, medians = sanitize_comp_features(df)
+        assert inactive == []
+        assert not clean[ALL_VECTOR_FEATURES].isna().any().any()
+        assert medians["total_living_area"] == pytest.approx(
+            df["total_living_area"].median()
+        )
+        assert clean.loc[1, "total_living_area"] == pytest.approx(
+            medians["total_living_area"]
+        )
+
+    def test_provided_medians_prefer_over_computed(self, training_df):
+        df = training_df.copy()
+        df.loc[2, "beds"] = np.nan
+        provided = {c: 1.0 for c in PHYSICAL_FEATURES}
+        clean, _, medians = sanitize_comp_features(df, imputation_medians=provided)
+        assert clean.loc[2, "beds"] == 1.0
+        assert medians["beds"] == 1.0
+
+    def test_build_and_query_imputation_consistent(self, training_df):
+        _, _, medians = sanitize_comp_features(training_df)  # build time
+        query = training_df.iloc[1:2].copy()
+        query.loc[1, "cpi"] = np.nan
+        clean_q, inactive_q, _ = sanitize_comp_features(query, medians)
+        assert inactive_q == []  # cpi column has values elsewhere → active
+        assert clean_q.loc[1, "cpi"] == pytest.approx(medians["cpi"])
+
+    def test_build_comp_vector_byte_identical_when_no_nans(self, training_df):
+        """End-to-end: sanitizing a NaN-free frame changes nothing."""
+        features = CompFinderFeatures()
+        scaler = StandardScaler().fit(training_df[ALL_VECTOR_FEATURES].values)
+        features.fit(training_df)
+        features.set_scaler(scaler)
+        v_before = features.build_comp_vector(training_df)
+        clean, inactive, _ = sanitize_comp_features(training_df)
+        assert inactive == []
+        v_after = features.build_comp_vector(clean)
+        np.testing.assert_array_equal(v_before, v_after)
+
+    def test_all_nan_input_leaves_no_nans(self):
+        nan_df = pd.DataFrame({f: [np.nan] * 4 for f in ALL_VECTOR_FEATURES})
+        clean, inactive, medians = sanitize_comp_features(nan_df)
+        assert sorted(inactive) == ["geographic", "macro", "physical"]
+        assert not clean[ALL_VECTOR_FEATURES].isna().any().any()
+        assert all(v == 0.0 for v in medians.values())
+
+
+class TestEnsureStoreFeatureColumns:
+    def test_adds_missing_macro_and_geo_as_nan(self, training_df):
+        df = training_df.drop(columns=GEO_VELOCITY_FEATURES + MACRO_FEATURES)
+        out = ensure_store_feature_columns(df)
+        for col in GEO_VELOCITY_FEATURES + MACRO_FEATURES:
+            assert col in out.columns
+            assert out[col].isna().all()
+        assert not any(
+            c in df.columns.difference(out.columns) for c in out.columns
+        )
+
+    def test_noop_when_columns_present(self, training_df):
+        assert ensure_store_feature_columns(training_df) is training_df
+
+    def test_does_not_add_physical(self, training_df):
+        df = training_df.drop(columns=["beds"])
+        out = ensure_store_feature_columns(df)
+        assert "beds" not in out.columns
 
 
 # ---------------------------------------------------------------------------

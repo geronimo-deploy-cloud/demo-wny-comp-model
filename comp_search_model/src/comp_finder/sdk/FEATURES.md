@@ -81,3 +81,14 @@ Any new model added to this workspace should follow the same pattern:
 - Declare model-specific features locally in its own `FeatureSet`.
 - Add a test that asserts the consumer's fallback lists match the canonical lists (by length and by feature name).
 - Update this document if the model has unique feature conventions.
+
+## Fail-Safe NaN Policy (Inactive Feature Families)
+
+The geographic velocity features are derived functions imported from `expected_transaction_price` — in a venv without that package (or whenever the geographic feature store is down) they emit NaN. The macro features are NaN when no FRED data was joined. Raw NaN reaches `BallTree` as a hard crash ("Input contains NaN") at both index build and query time, so the comp-finder ships a fail-safe policy (Ticket 6a, options 1 + 2):
+
+1. **Inactive families are zero-filled.** A family (`physical` / `macro` / `geographic`) whose comp-vector columns are *entirely* NaN is declared INACTIVE and zero-filled before standardization, so it contributes (a constant that) nothing to pairwise distances. This is applied identically at index build (`CompSearchPipeline.run`) and at query time (`CompFinder.find_comps`), matching the semantics `experiments/comp_quality.py` uses. The build logs the zeroed families and reports them in its run summary under `inactive_families`.
+2. **Per-row NaNs are median-imputed.** NaNs inside otherwise-active families (e.g. one sale with a missing `year_built`) are imputed with per-column population medians. Medians are computed at build time and persisted alongside the index as the `comp_vector_imputation_medians` artifact; queries loaded from that store apply the same medians so a query row is treated exactly like its population counterpart. Indexes built before this policy have no medians artifact — `CompFinder` then falls back to build-time medians from the query matrix (0.0 for all-NaN columns).
+
+When no NaNs are present anywhere the policy is a no-op: vectors are byte-identical to pre-policy behavior. `CompFinderFeatures.build_comp_vector()` itself stays NaN-transparent (it is a pure vectorizer); the policy lives in `sanitize_comp_features()` in `sdk/features.py`, called by both the build and query paths. A companion `ensure_store_feature_columns()` materializes missing macro/geo input columns as NaN before `transform()` (which requires every declared column), so inputs that never joined FRED/geo data reach the inactive-family logic instead of erroring; missing *physical* columns still raise the normal required-feature error.
+
+**Known limitation:** a query whose geo columns are zero-filled against an index built with *live* geo values (or vice versa) compares different environments — the zero-filled columns carry a shared constant offset rather than a true zero contribution. Build and query must therefore come from the same store; mixing a full-environment index with bare-venv queries degrades (but does not crash) ranking quality.
