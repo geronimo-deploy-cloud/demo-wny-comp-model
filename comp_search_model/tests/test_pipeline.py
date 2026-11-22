@@ -22,9 +22,15 @@ from comp_finder.pipeline import (
     INDEX_VERSION,
     INDEX_ARTIFACT_NAME,
     LOOKUP_ARTIFACT_NAME,
+    MEDIANS_ARTIFACT_NAME,
     UNIFIED_COLUMNS,
 )
-from comp_finder.sdk.features import ALL_VECTOR_FEATURES
+from comp_finder.sdk.features import (
+    ALL_VECTOR_FEATURES,
+    GEO_VELOCITY_FEATURES,
+    MACRO_FEATURES,
+    SCALER_ARTIFACT_NAME,
+)
 from geronimo.artifacts import ArtifactStore
 
 
@@ -487,6 +493,83 @@ class TestErrorHandling:
         pipeline = CompSearchPipeline()
         with pytest.raises(RuntimeError, match="not initialized"):
             pipeline.run()
+
+
+# =============================================================================
+# Fail-safe inactive-family handling (Ticket 6a)
+# =============================================================================
+
+
+class TestFailSafePipelineRun:
+    """run() and the query path must survive a venv without
+    expected_transaction_price (geo features emit NaN, macro never joined).
+    """
+
+    def _run_bare_pipeline(self, monkeypatch, tmp_path, sales):
+        """Run the real pipeline against synthetic data and a temp store."""
+        import comp_finder.pipeline as pipeline_module
+
+        monkeypatch.setattr(
+            pipeline_module, "_load_combined_training_data", lambda: sales
+        )
+        monkeypatch.setattr(
+            pipeline_module,
+            "ArtifactStore",
+            lambda project=None, version=None, base_path=None: ArtifactStore(
+                project=project, version=version, base_path=str(tmp_path)
+            ),
+        )
+        # Identity-ish scaler (zero-variance fit) standing in for the
+        # production scaler CompFinderModel.train() persists.
+        scaler = StandardScaler().fit(np.zeros((2, len(ALL_VECTOR_FEATURES))))
+        monkeypatch.setattr(CompSearchPipeline, "_load_scaler", lambda self: scaler)
+
+        pipeline = CompSearchPipeline()
+        pipeline.initialize()
+        return pipeline, pipeline.run(), scaler
+
+    def test_run_completes_and_zeroes_inactive_families(
+        self, monkeypatch, tmp_path, geo_none
+    ):
+        sales = _make_synthetic_sales(30)
+        _, summary, _ = self._run_bare_pipeline(monkeypatch, tmp_path, sales)
+        assert summary["status"] == "success"
+        assert "geographic" in summary["inactive_families"]
+        assert "macro" in summary["inactive_families"]
+        # index + lookup + imputation medians
+        assert summary["artifacts_saved"] == 3
+
+    def test_medians_published_with_index(self, monkeypatch, tmp_path, geo_none):
+        sales = _make_synthetic_sales(30)
+        self._run_bare_pipeline(monkeypatch, tmp_path, sales)
+        store = ArtifactStore(
+            project=INDEX_PROJECT, version=INDEX_VERSION, base_path=str(tmp_path)
+        )
+        medians = store.get(MEDIANS_ARTIFACT_NAME)
+        assert set(medians) == set(ALL_VECTOR_FEATURES)
+        assert all(np.isfinite(v) for v in medians.values())
+        for col in GEO_VELOCITY_FEATURES + MACRO_FEATURES:
+            assert medians[col] == 0.0
+
+    def test_comp_finder_answers_queries_in_bare_venv(
+        self, monkeypatch, tmp_path, geo_none
+    ):
+        from comp_finder.sdk.model import CompFinder
+
+        sales = _make_synthetic_sales(30)
+        _, _, scaler = self._run_bare_pipeline(monkeypatch, tmp_path, sales)
+        # In production CompFinderModel.save() persists the scaler to the
+        # same store; publish it so CompFinder can load all artifacts.
+        store = ArtifactStore(
+            project=INDEX_PROJECT, version=INDEX_VERSION, base_path=str(tmp_path)
+        )
+        store.save(SCALER_ARTIFACT_NAME, scaler)
+
+        finder = CompFinder(base_path=str(tmp_path))
+        results = finder.find_comps(sales.iloc[0].to_dict(), k=5)
+        assert len(results) == 5
+        assert all(np.isfinite(r["distance"]) for r in results)
+        assert finder._imputation_medians is not None
 
 
 # =============================================================================

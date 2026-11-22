@@ -31,12 +31,15 @@ from .features import (
     MACRO_FEATURES,
     PHYSICAL_FEATURES,
     get_comp_vector_info,
+    ensure_store_feature_columns,
+    sanitize_comp_features,
 )
 from ..pipeline import (
     INDEX_ARTIFACT_NAME,
     INDEX_PROJECT,
     INDEX_VERSION,
     LOOKUP_ARTIFACT_NAME,
+    MEDIANS_ARTIFACT_NAME,
 )
 from sklearn.preprocessing import StandardScaler
 
@@ -253,10 +256,16 @@ def _clean_scalar(value: Any) -> Any:
 class CompFinder:
     """Query the precomputed comp-vector index for nearest historical sales.
 
-    On initialization, loads the BallTree index, the lookup table, and
-    the fitted comp-vector scaler from the ``comp-finder`` ArtifactStore
+    On initialization, loads the BallTree index, the lookup table, the
+    fitted comp-vector scaler, and (when present) the build-time
+    imputation medians from the ``comp-finder`` ArtifactStore
     (project / version "1.0.0") — the same artifacts the index batch
     pipeline publishes and the same store the Ticket-1 scaler lives in.
+    Queries apply the same fail-safe NaN policy as the index build:
+    all-NaN feature families are zero-filled (contributing nothing to
+    distance) and per-row NaNs are imputed with the persisted medians,
+    so the finder still answers queries when e.g. the geographic feature
+    store is unavailable.
 
     Args:
         store: Optional pre-built ArtifactStore.  When omitted, a store
@@ -291,6 +300,16 @@ class CompFinder:
 
         # The fitted scaler from Ticket 1 (saved by CompFinderModel).
         scaler: StandardScaler = self._store.get(SCALER_ARTIFACT_NAME)
+
+        # Per-column imputation medians persisted by the index build
+        # (optional — absent for indexes built before the fail-safe policy).
+        try:
+            self._imputation_medians: Optional[dict] = self._store.get(
+                MEDIANS_ARTIFACT_NAME
+            )
+        except Exception:
+            self._imputation_medians = None
+
         self.features = CompFinderFeatures()
         # FeatureSet requires fit() before transform(); there are no
         # stateful transformers, so an empty frame declaring every
@@ -368,7 +387,15 @@ class CompFinder:
                 f"got {type(property_features).__name__}"
             )
 
-        features_df = self.features.transform(df)
+        features_df = self.features.transform(ensure_store_feature_columns(df))
+        # Fail-safe NaN policy (see sanitize_comp_features): inactive
+        # families are zero-filled and NaNs in active families imputed
+        # with the build-time medians, so a query never crashes BallTree
+        # with "Input contains NaN" — e.g. in a venv without the
+        # regressor package, or while the geo feature store is down.
+        features_df, _, _ = sanitize_comp_features(
+            features_df, self._imputation_medians
+        )
         vector = np.asarray(
             self.features.build_comp_vector(features_df), dtype=np.float64
         ).reshape(1, -1)

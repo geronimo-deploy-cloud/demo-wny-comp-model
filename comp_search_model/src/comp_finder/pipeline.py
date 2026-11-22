@@ -36,6 +36,8 @@ from .sdk.features import (
     SCALER_ARTIFACT_NAME,
     SCALER_PROJECT,
     SCALER_VERSION,
+    ensure_store_feature_columns,
+    sanitize_comp_features,
 )
 from .sdk.data_sources import _load_combined_training_data
 
@@ -46,6 +48,7 @@ INDEX_PROJECT = "comp-finder"
 INDEX_VERSION = "1.0.0"
 INDEX_ARTIFACT_NAME = "comp_vector_index"
 LOOKUP_ARTIFACT_NAME = "comp_vector_lookup"
+MEDIANS_ARTIFACT_NAME = "comp_vector_imputation_medians"
 
 
 class CompSearchPipeline(BatchPipeline):
@@ -76,6 +79,7 @@ class CompSearchPipeline(BatchPipeline):
         self.h3_resolution = h3_resolution
         self._index: Optional[BallTree] = None
         self._lookup_df: Optional[pd.DataFrame] = None
+        self._imputation_medians: Optional[dict] = None
 
     def initialize(self):
         """Initialize pipeline — create the features instance."""
@@ -88,12 +92,14 @@ class CompSearchPipeline(BatchPipeline):
 
         Steps:
             1. Load full historical sales data
-            2. Transform to feature columns
+            2. Transform to feature columns and apply the fail-safe
+               NaN policy (zero-fill inactive families, impute the rest
+               with column medians)
             3. Load scaler from ArtifactStore
             4. Build comp vectors for every sale
             5. Build BallTree index
             6. Build lookup table
-            7. Save index and lookup to ArtifactStore
+            7. Save index, lookup, and imputation medians to ArtifactStore
 
         Returns:
             Dict with execution summary.
@@ -112,9 +118,22 @@ class CompSearchPipeline(BatchPipeline):
 
         logger.info("Loaded %d sales records", len(df))
 
-        # 2. Transform to get feature columns
+        # 2. Transform to get feature columns (missing macro/geo store
+        # columns are materialized as NaN so transform can require them).
         logger.info("Transforming features...")
-        features_df = self.features.transform(df)
+        transform_input = ensure_store_feature_columns(df)
+        self.features.fit(transform_input)
+        features_df = self.features.transform(transform_input)
+
+        # 2b. Fail-safe NaN policy: zero-fill inactive feature families,
+        # impute per-row NaNs in active families with column medians
+        # (persisted for query time).  See sdk/features.sanitize_comp_features.
+        features_df, inactive_families, medians = sanitize_comp_features(features_df)
+        self._imputation_medians = medians
+        if inactive_families:
+            logger.warning(
+                "Inactive feature families zeroed: %s", ", ".join(inactive_families)
+            )
 
         # 3. Load scaler from ArtifactStore
         logger.info("Loading comp vector scaler from ArtifactStore...")
@@ -148,6 +167,7 @@ class CompSearchPipeline(BatchPipeline):
             "comp_vector_length": len(comp_vectors[0]),
             "index_type": "BallTree",
             "features": list(ALL_VECTOR_FEATURES),
+            "inactive_families": inactive_families,
             "scaler_project": SCALER_PROJECT,
             "scaler_version": SCALER_VERSION,
             "artifacts_saved": len(saved),
@@ -191,6 +211,16 @@ class CompSearchPipeline(BatchPipeline):
         )
         saved.append(LOOKUP_ARTIFACT_NAME)
 
+        # Save per-column imputation medians so queries apply the same
+        # fail-safe NaN policy used at build time.
+        if self._imputation_medians is not None:
+            logger.info("Saving imputation medians to ArtifactStore...")
+            store.save(
+                name=MEDIANS_ARTIFACT_NAME,
+                artifact=self._imputation_medians,
+            )
+            saved.append(MEDIANS_ARTIFACT_NAME)
+
         return saved
 
     def load(self, store: ArtifactStore) -> None:
@@ -214,6 +244,13 @@ class CompSearchPipeline(BatchPipeline):
         self._lookup_df = store.get(
             name=LOOKUP_ARTIFACT_NAME,
         )
+
+        # Load imputation medians (optional — indexes built before the
+        # fail-safe policy shipped don't have one).
+        try:
+            self._imputation_medians = store.get(name=MEDIANS_ARTIFACT_NAME)
+        except Exception:
+            self._imputation_medians = None
 
     def find_comps(
         self,
