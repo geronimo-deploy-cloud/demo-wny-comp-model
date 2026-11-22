@@ -33,15 +33,19 @@ Experiments
 
 Caveats (surfaced in the output):
 - The 12 geographic velocity features are derived functions resolved
-  from ``expected_transaction_price``.  In environments where that
-  package is absent they emit NaN, and this script treats the
-  geographic family as INACTIVE: NaNs are replaced with 0.0
-  pre-standardization (zero contribution) and ablation configs that
-  use the family are skipped.  Synthetic mode injects synthetic geo
-  values via the same identity-passthrough mechanism the tests use
-  (see the ``geo_passthrough`` fixture in tests/test_finder.py).
-- Macro features are likewise zeroed when absent from the input (the
-  combined loader does not join FRED data).
+  from ``expected_transaction_price`` against the geographic-feature-
+  store ArtifactStore.  In ``real`` mode the store lookup is used
+  directly (geo family ACTIVE) whenever the regressor package is
+  installed.  Where the package or its artifacts are unavailable the
+  features emit NaN and this script treats the geographic family as
+  INACTIVE: NaNs are replaced with 0.0 pre-standardization (zero
+  contribution) and ablation configs that use the family are skipped.
+  Synthetic mode injects synthetic geo values via the same identity-
+  passthrough mechanism the tests use (see the ``geo_passthrough``
+  fixture in tests/test_finder.py).
+- Macro features are joined in ``real`` mode from the public FRED CSV
+  endpoint (no API key needed; see ``fetch_macro_daily``).  They are
+  zeroed when the fetch fails or when absent from the input.
 - Query rows with missing feature values are imputed with the same
   per-column population medians used when building the index, so a
   query vector always matches how its population row was treated.
@@ -49,10 +53,12 @@ Caveats (surfaced in the output):
 Usage:
     uv run python -m comp_finder.experiments.comp_quality synthetic
     uv run python -m comp_finder.experiments.comp_quality real --limit 2000
+    uv run python -m comp_finder.experiments.comp_quality real --physical-only
     uv run python -m comp_finder.experiments.comp_quality synthetic --json out.json
 """
 
 import argparse
+import contextlib
 import json
 import logging
 import math
@@ -66,6 +72,7 @@ from typing import Optional
 import joblib
 import numpy as np
 import pandas as pd
+import requests
 from sklearn.neighbors import BallTree
 from sklearn.preprocessing import StandardScaler
 
@@ -78,6 +85,7 @@ from ..pipeline import (
     LOOKUP_ARTIFACT_NAME,
     UNIFIED_COLUMNS,
 )
+from ..sdk import features as features_module
 from ..sdk.features import (
     ALL_VECTOR_FEATURES,
     CompFinderFeatures,
@@ -121,7 +129,8 @@ def install_geo_passthrough():
     feature store (an optional dependency); when it is unavailable they
     emit NaN, which crashes BallTree.  Passthroughs let an input column
     flow through unchanged — synthetic mode fills those columns, and
-    real mode ends up with NaN -> 0.0 (see prepare_population).
+    ``real --physical-only`` ends up with NaN -> 0.0 (see
+    prepare_population).  See ``geo_mode`` for when this is installed.
 
     Returns:
         A zero-argument restore callable that puts the original
@@ -139,6 +148,134 @@ def install_geo_passthrough():
             CompFinderFeatures.__dict__[name]._derived_feature_fn = fn
 
     return restore
+
+
+#: Geo derived feature functions as imported into this package's feature
+#: module — None when the regressor package is not installed.
+_GEO_FNS = [
+    getattr(features_module, f"_{name}", None) for name in GEO_VELOCITY_FEATURES
+]
+
+#: Real-mode macro source: FRED public CSV endpoint (no API key required).
+#: Mirrors the series mapped by the regressor's ``_load_macro_economic_data``
+#: (which needs FRED_API_KEY); the values are the same published series.
+FRED_PUBLIC_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+MACRO_SERIES_IDS = {
+    "mortgage_30y": "MORTGAGE30US",
+    "fed_funds": "FEDFUNDS",
+    "cpi": "CPIAUCSL",
+    "unemployment": "UNRATE",
+}
+
+
+def resolve_geo_mode(use_store: bool) -> str:
+    """Decide how the geo velocity features get their values.
+
+    "store"      — the real H3-lookup derived functions run against the
+                   geographic-feature-store (geographic family active,
+                   provided the store artifacts exist; if they don't the
+                   features emit NaN and are treated as INACTIVE, which
+                   is the graceful-fallback path).
+    "passthrough" — identity passthroughs (synthetic mode, and real mode
+                   with ``--physical-only`` or without the regressor
+                   package installed).
+    """
+    if not use_store:
+        return "passthrough"
+    if all(fn is not None for fn in _GEO_FNS):
+        return "store"
+    logger.warning(
+        "Geo features requested from the feature store but "
+        "expected_transaction_price is not installed — falling back to "
+        "passthrough (geographic family will be INACTIVE)."
+    )
+    return "passthrough"
+
+
+@contextlib.contextmanager
+def geo_mode(use_store: bool = False):
+    """Context manager choosing how the geo derived features get values.
+
+    "store" mode wraps the real feature-store lookups with the
+    input-column fallback (``install_store_geo_fallback``); otherwise the
+    identity passthrough is installed (the pre-store behavior).
+    """
+    mode = resolve_geo_mode(use_store)
+    restore = install_store_geo_fallback() if mode == "store" else install_geo_passthrough()
+    try:
+        yield mode
+    finally:
+        restore()
+
+
+def install_store_geo_fallback():
+    """Wrap the real geo store lookups with an input-column fallback.
+
+    ``CompFinder.find_comps`` re-runs the derived functions on every
+    query row, and the store returns NaN for properties outside grid
+    coverage — a NaN comp vector crashes BallTree.  The wrapper keeps
+    the live lookup but falls back to the query row's pre-imputed value
+    (see ``_query_row``) wherever the lookup is NaN, and to 0.0-
+    /median-imputed columns on population rows (see prepare_population).
+
+    Returns a restore callable, mirroring install_geo_passthrough.
+    """
+    originals = {}
+    for name in GEO_VELOCITY_FEATURES:
+        feature = CompFinderFeatures.__dict__[name]
+        originals[name] = feature._derived_feature_fn
+        real_fn = getattr(features_module, f"_{name}")
+
+        def fn(df, real_fn=real_fn, name=name):
+            vals = real_fn(df)
+            if name in df.columns:
+                vals = vals.where(
+                    ~pd.isna(vals), pd.to_numeric(df[name], errors="coerce")
+                )
+            return vals
+
+        feature._derived_feature_fn = fn
+
+    def restore():
+        for name, fn in originals.items():
+            CompFinderFeatures.__dict__[name]._derived_feature_fn = fn
+
+    return restore
+
+
+def fetch_macro_daily(start: str = "2021-06-01") -> Optional[pd.DataFrame]:
+    """Fetch the 4 macro series from FRED's public CSV endpoint.
+
+    Weekly/monthly observations are forward-filled to daily so they can
+    be mapped onto sale dates (mirrors the regressor's macro loader).
+
+    Returns:
+        Daily-indexed DataFrame with the MACRO_FEATURES columns, or None
+        if no series could be fetched.
+    """
+    frames = []
+    for col, series_id in MACRO_SERIES_IDS.items():
+        try:
+            resp = requests.get(
+                FRED_PUBLIC_CSV_URL,
+                params={"id": series_id, "cosd": start},
+                timeout=60,
+            )
+            resp.raise_for_status()
+            raw = pd.read_csv(BytesIO(resp.content), na_values=["."])
+            values = pd.to_numeric(raw[raw.columns[-1]], errors="coerce")
+            values.index = pd.to_datetime(raw[raw.columns[0]])
+            values = values[~values.index.duplicated(keep="last")].sort_index()
+            frames.append(
+                pd.DataFrame({col: values.resample("D").ffill()})
+            )
+        except Exception as e:
+            logger.warning("Failed to fetch FRED %s: %s", series_id, e)
+    if not frames:
+        return None
+    macro = pd.concat(frames, axis=1, sort=True)
+    logger.info("Fetched FRED macro data: %d daily rows", len(macro))
+    return macro
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +299,9 @@ def prepare_population(df: pd.DataFrame):
     transform, a feature family whose columns are entirely NaN is
     declared INACTIVE and zeroed (zero contribution after
     standardization); remaining per-row NaNs are imputed with the
-    column median.
+    column median, and a column that is entirely missing within an
+    active family (store grid coverage varies by radius/window) is
+    imputed with 0.0.
 
     Returns:
         (features, transformed_df, inactive_family_names, medians) where
@@ -190,6 +329,9 @@ def prepare_population(df: pd.DataFrame):
     if n_nans:
         logger.info("Imputing %d remaining NaN feature values with column medians", n_nans)
         matrix = matrix.fillna(medians)
+    # Columns whose median is itself NaN (entirely missing within an
+    # active family — sparse grid coverage) fall back to 0.0.
+    matrix = matrix.fillna(0.0)
     transformed[ALL_VECTOR_FEATURES] = matrix
 
     return features, transformed, inactive, medians.fillna(0.0).to_dict()
@@ -273,7 +415,7 @@ def price_metrics(actual, predicted) -> dict:
 # ---------------------------------------------------------------------------
 
 def run_holdout(population: pd.DataFrame, query_positions: list[int], k: int,
-                seed: int) -> dict:
+                seed: int, use_store_geo: bool = False) -> dict:
     """Leave-one-out price prediction through the real CompFinder.
 
     For each query sale: rebuild + republish the index without that
@@ -294,8 +436,7 @@ def run_holdout(population: pd.DataFrame, query_positions: list[int], k: int,
         if "city" in population.columns else {}
     )
 
-    restore = install_geo_passthrough()
-    try:
+    with geo_mode(use_store_geo):
         with tempfile.TemporaryDirectory(prefix="comp_quality_") as tmp:
             for j, pos in enumerate(query_positions):
                 if j % 10 == 0:
@@ -318,8 +459,6 @@ def run_holdout(population: pd.DataFrame, query_positions: list[int], k: int,
                 random_k.append(float(others_prices.sample(
                     min(k, len(others_prices)),
                     random_state=int(rng.integers(2**31))).median()))
-    finally:
-        restore()
 
     results = pd.DataFrame({
         "actual": actual, "comp_finder": comp_pred, "mean_similarity": mean_sim,
@@ -351,7 +490,8 @@ def run_holdout(population: pd.DataFrame, query_positions: list[int], k: int,
 # Experiment 2 — feature-family ablation (direct vector space)
 # ---------------------------------------------------------------------------
 
-def run_ablation(population: pd.DataFrame, query_positions: list[int], k: int) -> tuple[list, list]:
+def run_ablation(population: pd.DataFrame, query_positions: list[int], k: int,
+                 use_store_geo: bool = False) -> tuple[list, list]:
     """Leave-one-out price prediction under different family weights.
 
     Same protocol as the holdout experiment but computed directly on the
@@ -363,8 +503,7 @@ def run_ablation(population: pd.DataFrame, query_positions: list[int], k: int) -
         {"config": name, "skipped": True} for configs that need an
         inactive family.
     """
-    restore = install_geo_passthrough()
-    try:
+    with geo_mode(use_store_geo):
         features, transformed, inactive, _ = prepare_population(population)
         scaler = StandardScaler().fit(transformed[ALL_VECTOR_FEATURES].values)
         features.set_scaler(scaler)
@@ -389,8 +528,6 @@ def run_ablation(population: pd.DataFrame, query_positions: list[int], k: int) -
             metrics.update({"config": name, "mean_top1_distance": float(np.mean(d1s))})
             rows.append(metrics)
         return rows, inactive
-    finally:
-        restore()
 
 
 # ---------------------------------------------------------------------------
@@ -522,11 +659,15 @@ def generate_synthetic_population(n: int = 800, seed: int = 42,
 # Real population loader
 # ---------------------------------------------------------------------------
 
-def load_real_population(limit: int = 0, cache_path: Path = DEFAULT_CACHE_PATH) -> pd.DataFrame:
+def load_real_population(limit: int = 0, cache_path: Path = DEFAULT_CACHE_PATH,
+                         join_macro: bool = True) -> pd.DataFrame:
     """Load (or read from cache) the combined Buffalo + Rochester sales.
 
     Applies the documented comp-finder population filter: sale_price in
-    [$100k, $600k] and sale_date after 2022-01-01.
+    [$100k, $600k] and sale_date after 2022-01-01.  When ``join_macro``
+    is set, the 4 macro series are joined from FRED's public endpoint
+    onto each sale's date (the combined data loader, like the one in
+    the regressor project, does not carry macro columns).
     """
     if cache_path.exists():
         logger.info("Reading cached population from %s", cache_path)
@@ -551,15 +692,41 @@ def load_real_population(limit: int = 0, cache_path: Path = DEFAULT_CACHE_PATH) 
 
     if limit and limit < len(df):
         df = df.sample(limit, random_state=0)
-    return df.reset_index(drop=True)
+    df = df.reset_index(drop=True)
+
+    if join_macro:
+        macro = fetch_macro_daily()
+        if macro is None:
+            logger.warning(
+                "Macro data unavailable — macro family will be INACTIVE."
+            )
+        else:
+            sale_days = pd.to_datetime(df["sale_date"], errors="coerce").dt.normalize()
+            aligned = macro.reindex(sale_days.to_numpy())
+            aligned.index = df.index
+            for col in MACRO_FEATURES:
+                if col in aligned.columns:
+                    df[col] = aligned[col].to_numpy()
+            logger.info(
+                "Macro join: %.1f%% of sales have values",
+                100.0 * df[MACRO_FEATURES].notna().any(axis=1).mean(),
+            )
+    return df
 
 
 # ---------------------------------------------------------------------------
 # Driver + reporting
 # ---------------------------------------------------------------------------
 
-def run_all(population: pd.DataFrame, n_queries: int, k: int, seed: int) -> dict:
-    """Run both experiments on one population and return the raw report."""
+def run_all(population: pd.DataFrame, n_queries: int, k: int, seed: int,
+            use_store_geo: bool = False) -> dict:
+    """Run both experiments on one population and return the raw report.
+
+    ``use_store_geo`` (real mode): resolve the geographic features
+    through the geographic feature store instead of the synthetic
+    passthrough.  Falls back to the passthrough when the regressor
+    package is not installed.
+    """
     population = population[
         population["sale_price"].notna() & (population["sale_price"].astype(float) > 0)
     ].reset_index(drop=True)
@@ -571,20 +738,16 @@ def run_all(population: pd.DataFrame, n_queries: int, k: int, seed: int) -> dict
         int(p) for p in rng.choice(len(population), size=min(n_queries, len(population)), replace=False)
     )
 
-    restore = install_geo_passthrough()
-    try:
-        _, _, inactive, _ = prepare_population(population)
-    finally:
-        restore()
-
-    holdout = run_holdout(population, query_positions, k, seed)
-    ablation, inactive = run_ablation(population, query_positions, k)
+    geo_mode_resolved = resolve_geo_mode(use_store_geo)
+    holdout = run_holdout(population, query_positions, k, seed, use_store_geo)
+    ablation, inactive = run_ablation(population, query_positions, k, use_store_geo)
 
     return {
         "population_size": int(len(population)),
         "n_queries": len(query_positions),
         "k": k,
         "seed": seed,
+        "geo_mode": geo_mode_resolved,
         "inactive_families": inactive,
         "holdout": holdout,
         "ablation": ablation,
@@ -605,6 +768,8 @@ def print_report(report: dict, mode: str, control: Optional[dict] = None) -> Non
     print(f"\n{sep}\n CompFinder quality report — {mode}")
     print(f" population: {report['population_size']} sales | queries: "
           f"{report['n_queries']} | k: {report['k']} | seed: {report['seed']}")
+    if report.get("geo_mode"):
+        print(f" geo features: {report['geo_mode']}")
     if report["inactive_families"]:
         print(f" INACTIVE families (zeroed): {', '.join(report['inactive_families'])}")
     print(sep)
@@ -672,6 +837,11 @@ def main(argv=None) -> int:
     real = sub.add_parser("real", parents=[common], help="combined Buffalo + Rochester sales")
     real.add_argument("--limit", type=int, default=0, help="sample down to this many sales (0 = all)")
     real.add_argument("--cache", type=Path, default=DEFAULT_CACHE_PATH)
+    real.add_argument(
+        "--physical-only", action="store_true",
+        help="skip the geographic feature store and the FRED macro join "
+             "(reproduces the Ticket-5 physical-only baseline)",
+    )
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -684,8 +854,13 @@ def main(argv=None) -> int:
         print_report(report, "synthetic (signal)", control=control)
         payload = {"signal": report, "control": control}
     else:
-        population = load_real_population(args.limit, args.cache)
-        report = run_all(population, args.n_queries, args.k, args.seed)
+        population = load_real_population(
+            args.limit, args.cache, join_macro=not args.physical_only,
+        )
+        report = run_all(
+            population, args.n_queries, args.k, args.seed,
+            use_store_geo=not args.physical_only,
+        )
         print_report(report, "real")
         payload = {"real": report}
 
